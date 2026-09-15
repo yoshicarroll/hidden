@@ -97,9 +97,25 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
 - **The notch**: hidden icons sit "under" the notch area on notched Macs; the
   trick cannot reveal them there. The real fix is a spillover/second-bar design
   (tracked in issues #357/#341/#148; candidate implementations in PRs #350/#358).
-- **macOS 27**: the menu bar re-architecture in macOS 27 betas
-  (`NSMenuBarNavigationSceneExtension`) breaks length-inflation hiding entirely
-  (issue #360). A different mechanism may be required.
+- **macOS 27**: the menu bar is hosted by `MenuBarAgent` and lays status
+  items out right-to-left; the first item that does not fit, and every item
+  after it, goes into a native overflow menu, and any item whose length reaches
+  half the display width is dropped from layout entirely. Length inflation
+  therefore does nothing (issue #360). On 27 `StatusBarController` instead
+  collapses by inserting blank filler items between the arrow and the
+  separator, each shorter than half the narrowest display and enough of them to
+  exceed the widest, so on every bar one filler fails to fit and carries the
+  separator and everything left of it into the overflow. Item order on 27 is a
+  key equal to `display right edge - 40 - item right edge`; `MenuBarAgent`
+  remembers the key of any item the user has Cmd-dragged, by app name plus
+  autosave name, and otherwise reads `NSStatusItem Preferred Position
+  <autosaveName>` from the app's defaults when the item appears. The key that
+  places a filler right of the separator is found by bisection with an 8pt
+  probe, cached, and re-validated on each collapse; fillers appear at 8pt and
+  are then grown, because an item that does not fit at insertion is re-keyed to
+  the overflow boundary. Every item of ours carries a key, since an unkeyed
+  item is flung to the far right when a keyed sibling appears. Measured on
+  27.0 (26A428); see the comments in `StatusBarController.swift`.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
   so the collapse can still fire there.
