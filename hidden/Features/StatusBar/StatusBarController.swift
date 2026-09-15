@@ -7,8 +7,14 @@
 //
 
 import AppKit
+import os.log
 
 class StatusBarController {
+    // Diagnostics for the macOS 27 mechanism. Read with
+    //   log show --last 2h --predicate 'subsystem == "com.dwarvesv.minimalbar"' --style compact
+    // (notice level persists; see docs/RUNBOOK.md).
+    static let diagnostics = Logger(subsystem: "com.dwarvesv.minimalbar", category: "macOS27")
+    private var stateAuditTimer: Timer?
     
     //MARK: - Variables
     private var timer:Timer? = nil
@@ -168,8 +174,9 @@ class StatusBarController {
         setupAlwayHideStatusBar()
         setupHoverToExpandIfEnabled()
         NotificationCenter.default.addObserver(self, selector: #selector(handleScreenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        if usesOverflowHiding { setupDiagnostics() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.collapseMenuBar()
+            self?.collapseMenuBar(reason: "launch")
         }
         
         if Preferences.areSeparatorsHidden {hideSeparators()}
@@ -178,6 +185,8 @@ class StatusBarController {
     
     deinit {
         NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        stateAuditTimer?.invalidate()
         hoverDwellTimer?.invalidate()
         if let monitor = hoverMonitor {
             NSEvent.removeMonitor(monitor)
@@ -202,7 +211,7 @@ class StatusBarController {
                 guard let self = self else { return }
                 self.hoverDwellTimer = nil
                 if self.isCollapsed && self.isMouseInMenuBar {
-                    self.expandMenubar()
+                    self.expandMenubar(reason: "hover")
                 }
             }
         }
@@ -214,6 +223,8 @@ class StatusBarController {
         let wasCollapsed = isCollapsed
         updateCollapsedLengths()
         if usesOverflowHiding {
+            let screens = NSScreen.screens.map { "\(Int($0.frame.minX))+\(Int($0.frame.width))" }.joined(separator: " ")
+            StatusBarController.diagnostics.notice("screens changed: [\(screens, privacy: .public)] collapsed=\(wasCollapsed)")
             // Filler geometry is derived from the display set, so rebuild whichever
             // chain is in use: the regular one while collapsed, the always-hidden
             // one while expanded (collapsing takes that section down anyway).
@@ -306,7 +317,7 @@ class StatusBarController {
     func showHideSeparatorsAndAlwayHideArea() {
         Preferences.areSeparatorsHidden ? self.showSeparators() : self.hideSeparators()
         
-        if self.isCollapsed {self.expandMenubar()}
+        if self.isCollapsed {self.expandMenubar(reason: "separators toggled")}
     }
     
     private func showSeparators() {
@@ -328,7 +339,7 @@ class StatusBarController {
         Preferences.areSeparatorsHidden = true
         
         if usesOverflowHiding {
-            if !isCollapsed { alwaysHiddenFillerChain.insert() }
+            if !isCollapsed && alwaysHiddenFillersWanted { alwaysHiddenFillerChain.insert() }
             return
         }
         if !self.isCollapsed {
@@ -341,17 +352,21 @@ class StatusBarController {
         //prevented rapid click cause icon show many in Dock
         if isToggle {return}
         isToggle = true
-        self.isCollapsed ? self.expandMenubar() : self.collapseMenuBar()
+        self.isCollapsed ? self.expandMenubar(reason: "arrow") : self.collapseMenuBar(reason: "arrow")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             self?.isToggle = false
         }
     }
     
-    private func collapseMenuBar() {
+    private func collapseMenuBar(reason: String) {
         guard self.isBtnSeparateValidPosition && !self.isCollapsed else {
+            if usesOverflowHiding {
+                StatusBarController.diagnostics.notice("collapse skipped (\(reason, privacy: .public)): validPosition=\(self.isBtnSeparateValidPosition) collapsed=\(self.isCollapsed)")
+            }
             autoCollapseIfNeeded()
             return
         }
+        if usesOverflowHiding { StatusBarController.diagnostics.notice("collapse (\(reason, privacy: .public))") }
 
         if usesOverflowHiding {
             // The always-hidden fillers would only add blank rows to the overflow
@@ -373,8 +388,9 @@ class StatusBarController {
             NSApp.deactivate()
         }
     }
-    private func expandMenubar() {
+    private func expandMenubar(reason: String) {
         guard self.isCollapsed else {return}
+        if usesOverflowHiding { StatusBarController.diagnostics.notice("expand (\(reason, privacy: .public))") }
         if usesOverflowHiding {
             fillerChain.remove()
             isCollapsedByOverflow = false
@@ -401,6 +417,47 @@ class StatusBarController {
         startTimerToAutoHide()
     }
 
+    // MARK: macOS 27 diagnostics
+
+    private func setupDiagnostics() {
+        let center = NSWorkspace.shared.notificationCenter
+        for (name, label) in [(NSWorkspace.willSleepNotification, "will sleep"), (NSWorkspace.didWakeNotification, "did wake"),
+                              (NSWorkspace.screensDidSleepNotification, "screens did sleep"), (NSWorkspace.screensDidWakeNotification, "screens did wake"),
+                              (NSWorkspace.activeSpaceDidChangeNotification, "active space changed")] {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else { return }
+                StatusBarController.diagnostics.notice("\(label, privacy: .public): collapsed=\(self.isCollapsed) fillers=\(self.fillerChain.items.count) inFlight=\(self.fillerChain.isInFlight)")
+            }
+        }
+        // MenuBarAgent hosts the bar; if it relaunches, every item is re-registered.
+        center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == "com.apple.MenuBarAgent", let self = self else { return }
+            StatusBarController.diagnostics.error("MenuBarAgent relaunched (pid \(app.processIdentifier)): collapsed=\(self.isCollapsed) fillers=\(self.fillerChain.items.count)")
+        }
+        stateAuditTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.auditCollapsedState()
+        }
+    }
+
+    // While collapsed, the filler next to the arrow must still sit right next to
+    // it (the separator may legitimately be in the overflow). Anything else means
+    // the system re-laid the bar under us; log it so the trigger can be found.
+    private func auditCollapsedState() {
+        guard isCollapsed, !fillerChain.isInFlight else { return }
+        guard let farthest = fillerChain.items.last else {
+            StatusBarController.diagnostics.error("audit: collapsed but no fillers on the bar")
+            return
+        }
+        guard let f = frameOf(farthest), let e = frameOf(btnExpandCollapse) else {
+            StatusBarController.diagnostics.error("audit: collapsed but frames unavailable: filler=\(String(describing: self.frameOf(farthest)), privacy: .public) arrow=\(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public)")
+            return
+        }
+        if !isAdjacent(left: f, right: e) {
+            StatusBarController.diagnostics.error("audit: collapsed but the filler next to the arrow is not adjacent: filler=\(Int(f.minX))-\(Int(f.maxX)) arrow=\(Int(e.minX))-\(Int(e.maxX))")
+        }
+    }
+
     // MARK: macOS 27 filler chains
 
     private var alwaysHiddenFillersWanted: Bool {
@@ -408,17 +465,30 @@ class StatusBarController {
     }
 
     private func setupFillerChains() {
-        fillerChain = makeFillerChain(prefix: "hiddenbar_fill") { [weak self] in self?.btnSeparate }
-        alwaysHiddenFillerChain = makeFillerChain(prefix: "hiddenbar_ahfill") { [weak self] in self?.btnAlwaysHidden }
+        // The regular chain validates against the arrow: on a crowded bar the
+        // separator itself is pushed into the overflow by the fillers (which is
+        // the intended result), so its frame is no longer usable as a reference.
+        fillerChain = makeFillerChain(prefix: "hiddenbar_fill", anchor: { [weak self] in self?.btnSeparate },
+                                      validate: { [weak self] _, farthest in
+                                          guard let self = self, let f = self.frameOf(farthest), let e = self.frameOf(self.btnExpandCollapse) else { return false }
+                                          let ok = self.isAdjacent(left: f, right: e)
+                                          if !ok { StatusBarController.diagnostics.notice("validate: arrow \(Int(e.minX))-\(Int(e.maxX)) farthest filler \(Int(f.minX))-\(Int(f.maxX)) screens item=\(String(describing: farthest.button?.window?.screen?.frame.minX), privacy: .public) arrow=\(String(describing: self.btnExpandCollapse.button?.window?.screen?.frame.minX), privacy: .public)") }
+                                          return ok
+                                      })
+        // The always-hidden chain's right-hand neighbour belongs to another app,
+        // so it keeps the default check against its own separator.
+        alwaysHiddenFillerChain = makeFillerChain(prefix: "hiddenbar_ahfill", anchor: { [weak self] in self?.btnAlwaysHidden }, validate: nil)
     }
 
-    private func makeFillerChain(prefix: String, anchor: @escaping () -> NSStatusItem?) -> FillerChain<StatusBarController> {
+    private func makeFillerChain(prefix: String, anchor: @escaping () -> NSStatusItem?,
+                                 validate: ((NSStatusItem, NSStatusItem) -> Bool)?) -> FillerChain<StatusBarController> {
         return FillerChain(host: self, prefix: prefix, anchor: anchor,
                            geometry: { [weak self] in self?.fillerGeometry() ?? .init(lengths: [100]) },
                            // Just below the anchor's geometric key is the natural
                            // first guess (larger keys sort further left).
                            initialGuess: { [weak self] anchorFrame in (self?.geometricPositionKey(ofFrame: anchorFrame) ?? 0) - 18 },
-                           placement: { [weak self] probe, anchor in self?.placement(ofProbe: probe, rightOf: anchor) ?? .unknown })
+                           placement: { [weak self] probe, anchor in self?.placement(ofProbe: probe, rightOf: anchor) ?? .unknown },
+                           validate: validate)
     }
 
     // A collapse whose fillers could not be placed: undo the collapsed state so
@@ -426,7 +496,7 @@ class StatusBarController {
     // still shows everything.
     private func rollBackFailedCollapse() {
         guard isCollapsedByOverflow else { return }
-        NSLog("HiddenBar27: collapse failed, rolling back to expanded")
+        StatusBarController.diagnostics.error("collapse failed, rolling back to expanded")
         isCollapsedByOverflow = false
         btnExpandCollapse.button?.image = Assets.collapseImage
         if Preferences.useFullStatusBarOnExpandEnabled {
@@ -461,9 +531,33 @@ class StatusBarController {
         return .init(lengths: lengths)
     }
 
+    // An item's app-side window sits on whichever display was active when the
+    // item was created, and stays there. Items created at different times can
+    // therefore report frames from different displays, which made probe-versus-
+    // separator comparisons meaningless (the search bisected to nothing whenever
+    // the user had moved to another display since launch). The trailing items are
+    // right-aligned identically on every bar, so every frame is translated into
+    // the separator's screen by its offset from the right edge before use.
+    private var referenceScreen: NSScreen? {
+        return btnSeparate.button?.window?.screen ?? NSScreen.main
+    }
+
     private func frameOf(_ item: NSStatusItem?) -> CGRect? {
         guard let button = item?.button, let window = button.window else { return nil }
-        return window.convertToScreen(button.convert(button.bounds, to: nil))
+        var frame = window.convertToScreen(button.convert(button.bounds, to: nil))
+        // A freshly created item reports a placeholder frame near the origin of
+        // its screen until MenuBarAgent lays it out; only a frame inside the
+        // screen's menu bar strip is a real position.
+        if let itemScreen = window.screen {
+            let strip = CGRect(x: itemScreen.frame.minX, y: itemScreen.visibleFrame.maxY - 1,
+                               width: itemScreen.frame.width, height: itemScreen.frame.maxY - itemScreen.visibleFrame.maxY + 2)
+            guard strip.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return nil }
+        }
+        if let itemScreen = window.screen, let reference = referenceScreen, itemScreen != reference {
+            frame.origin.x += reference.frame.maxX - itemScreen.frame.maxX
+            frame.origin.y += reference.frame.maxY - itemScreen.frame.maxY
+        }
+        return frame
     }
 
     // Two items are neighbours in the flow when only the 16pt inter-item spacing
@@ -530,7 +624,7 @@ class StatusBarController {
             if self.isMouseInMenuBar || self.isPreferencesWindowVisible {
                 self.startTimerToAutoHide()
             } else {
-                self.collapseMenuBar()
+                self.collapseMenuBar(reason: "auto-collapse timer")
             }
         }
     }
@@ -657,6 +751,6 @@ extension StatusBarController: FillerChainHost {
     }
 
     func log(_ message: String) {
-        NSLog("HiddenBar27: %@", message)
+        StatusBarController.diagnostics.notice("\(message, privacy: .public)")
     }
 }

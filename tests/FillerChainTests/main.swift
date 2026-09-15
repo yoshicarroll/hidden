@@ -27,6 +27,10 @@ final class FakeHost: FillerChainHost {
     var neverAttachPrefix: String? = nil
     /// Simulate MenuBarAgent ignoring the key of new non-probe items and dumping them far left.
     var misplaceFillers = false
+    /// Width of the region available to items. An item that does not fit at
+    /// insertion is re-keyed to the overflow boundary (just left of the last
+    /// fitting item), as MenuBarAgent does; resizing keeps keys.
+    var regionWidth: CGFloat? = nil
     var liveProbes = 0
     var maxLiveProbes = 0
     var probesCreated = 0
@@ -50,11 +54,30 @@ final class FakeHost: FillerChainHost {
     }
 
     // FillerChainHost
+    /// Keys of items that fit, laid out right to left within regionWidth.
+    private func fittingKeys() -> [Double] {
+        guard let region = regionWidth else { return items.map(\.key) }
+        var cursor = FakeHost.rightEdge; var fits: [Double] = []
+        for it in items.sorted(by: { $0.key < $1.key }) {
+            let x = cursor - it.length
+            if x < FakeHost.rightEdge - region { break }
+            fits.append(it.key); cursor = x - FakeHost.spacing
+        }
+        return fits
+    }
+    func fits(_ item: FakeItem) -> Bool { fittingKeys().contains(item.key) }
     func makeItem(prefix: String, key: Double, length: CGFloat) -> FakeItem {
         let isProbe = prefix.hasSuffix("probe")
         if isProbe { probesCreated += 1; liveProbes += 1; maxLiveProbes = max(maxLiveProbes, liveProbes) }
-        let effectiveKey = (!isProbe && misplaceFillers) ? 100_000 + Double(items.count) : key
-        return add("\(prefix)#\(items.count)", key: effectiveKey, length: length)
+        var effectiveKey = (!isProbe && misplaceFillers) ? 100_000 + Double(items.count) : key
+        let item = add("\(prefix)#\(items.count)", key: effectiveKey, length: length)
+        if regionWidth != nil, !fittingKeys().contains(effectiveKey) {
+            // Re-key to the boundary: just left of the last item that fits.
+            let lastFitting = fittingKeys().filter { $0 != effectiveKey }.max() ?? 0
+            effectiveKey = lastFitting + 0.00001
+            item.key = effectiveKey
+        }
+        return item
     }
     func removeItem(_ item: FakeItem) {
         if item.name.contains("probe") { liveProbes -= 1 }
@@ -66,6 +89,7 @@ final class FakeHost: FillerChainHost {
         if let p = neverAttachPrefix, item.name.hasPrefix(p) { return nil }
         item.frameQueries += 1
         if item.frameQueries <= attachDelay { return nil }
+        if regionWidth != nil, !fittingKeys().contains(item.key) { return CGRect(x: FakeHost.rightEdge - item.length, y: 0, width: item.length, height: 24) }
         return layoutFrame(of: item)
     }
     func after(_ seconds: TimeInterval, _ block: @escaping () -> Void) { queue.append((now + seconds, block)) }
@@ -112,12 +136,22 @@ func makeBar(_ host: FakeHost) -> (expand: FakeItem, separator: FakeItem, hidden
     return (e, s, [h1, h2])
 }
 
-func makeChain(_ host: FakeHost, anchor: FakeItem, prefix: String = "fill", count: Int = 3) -> FillerChain<FakeHost> {
+/// Validation like the app's regular chain: the filler farthest from the separator sits right next to the arrow.
+func validateAgainst(_ arrow: FakeItem, _ host: FakeHost) -> (FakeItem, FakeItem) -> Bool {
+    return { _, farthest in
+        guard let f = host.frame(of: farthest), let e = host.frame(of: arrow) else { return false }
+        let gap = e.minX - f.maxX
+        return gap >= -1 && gap <= 24
+    }
+}
+
+func makeChain(_ host: FakeHost, anchor: FakeItem, arrow: FakeItem? = nil, prefix: String = "fill", count: Int = 3) -> FillerChain<FakeHost> {
     FillerChain(host: host, prefix: prefix,
                 anchor: { anchor },
                 geometry: { .init(lengths: Array(repeating: 300, count: count)) },
                 initialGuess: { anchorFrame in Double(FakeHost.rightEdge - anchorFrame.maxX) - 18 },
-                placement: adjacencyRule)
+                placement: adjacencyRule,
+                validate: arrow.map { validateAgainst($0, host) })
 }
 
 func fillersAreRightOfSeparator(_ host: FakeHost, _ chain: FillerChain<FakeHost>, _ sep: FakeItem) -> Bool {
@@ -234,6 +268,31 @@ func testFinding5_slowAndNeverAttachingProbes() {
     expect(host.liveProbes == 0 && chain.items.isEmpty, "nothing left on the bar")
 }
 
+func testTightRegionFallsBackToSequentialPlacement() {
+    print("tight region: the fillers push the separator itself into the overflow; validation uses the arrow")
+    let host = FakeHost(); let bar = makeBar(host)
+    // Right of the separator: clock 130, wifi 22, arrow 32 with gaps = 232. Room for the probe and the
+    // separator while searching, but once four 8pt fillers (96) are in, the separator no longer fits.
+    host.regionWidth = 232 + 96 + 8
+    let chain = FillerChain<FakeHost>(host: host, prefix: "fill", anchor: { bar.separator },
+                geometry: { .init(lengths: [300, 500, 700, 700]) },
+                initialGuess: { f in Double(FakeHost.rightEdge - f.maxX) - 18 }, placement: adjacencyRule,
+                validate: validateAgainst(bar.expand, host))
+    var result: Bool? = nil
+    chain.insert { result = $0 }; host.run()
+    if ProcessInfo.processInfo.environment["DEBUG_TIGHT"] != nil {
+        for it in host.items.sorted(by: { $0.key < $1.key }) { print("     \(it.name) key=\(it.key) len=\(it.length) frame=\(host.frame(of: it).map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil")") }
+        print("     probesCreated=\(host.probesCreated) logs=\(host.logs)")
+    }
+    expect(result == true, "placement succeeds although the separator overflowed")
+    expect(chain.items.count == 4, "all four fillers exist (got \(chain.items.count))")
+    expect(!host.fits(bar.separator), "separator is in the overflow (hidden)")
+    let sepKey = bar.separator.key, expandKey = bar.expand.key
+    expect(chain.items.allSatisfy { $0.key > expandKey && $0.key < sepKey }, "every filler is keyed between the arrow and the separator (keys \(chain.items.map(\.key)))")
+    expect(Set(chain.items.map(\.length)) == Set([300, 500, 700]), "fillers grown to the ladder lengths (got \(chain.items.map(\.length)))")
+    expect(host.liveProbes == 0, "no probe left")
+}
+
 func testAnchorNeverAttaches() {
     print("anchor never attaches: fails without touching the bar")
     let host = FakeHost(); let bar = makeBar(host); let chain = makeChain(host, anchor: bar.separator)
@@ -278,6 +337,7 @@ testFinding1_independentGenerations()
 testFinding3_placementFailureCleansUp()
 testFinding4_idempotentInsert()
 testFinding5_slowAndNeverAttachingProbes()
+testTightRegionFallsBackToSequentialPlacement()
 testAnchorNeverAttaches()
 testRemoveDuringSearchCancelsSilently()
 print(failures == 0 ? "\nOK: \(checks) checks passed" : "\n\(failures) of \(checks) checks FAILED")

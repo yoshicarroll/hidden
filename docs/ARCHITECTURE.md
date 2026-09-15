@@ -125,7 +125,16 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   machine lives in `FillerChain.swift`, instantiated once for the separator and
   once for the always-hidden separator, and talks to the bar only through
   `FillerChainHost`, so `tests/run-filler-chain-tests.sh` runs it against a
-  simulated bar. Measured on 27.0 (26A428); see the comments in both files.
+  simulated bar. Two frame pitfalls the host layer handles: an item's app-side
+  window sits on whichever display was active when the item was created and
+  stays there, so frames are translated into the separator's screen by their
+  offset from the right edge before any comparison; and a new item reports a
+  placeholder frame near its screen's origin until MenuBarAgent lays it out,
+  which can take over a second for several items, so only frames inside the
+  menu bar strip count as attached. Placement is validated against the arrow,
+  not the separator, because on a crowded bar the fillers push the separator
+  itself into the overflow, which is the intended result. Measured on 27.0
+  (26A428); see the comments in both files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
   so the collapse can still fire there.

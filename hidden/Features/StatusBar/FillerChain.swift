@@ -49,7 +49,7 @@ final class FillerChain<Host: FillerChainHost> {
     static var maxAttempts: Int { 12 }
     static var maxUnknownStreak: Int { 3 }
     static var pollInterval: TimeInterval { 0.05 }
-    static var maxPolls: Int { 20 }
+    static var maxPolls: Int { 40 }
     /// Fillers sort just below the found key, i.e. away from the anchor, so a
     /// key found right at the anchor's edge cannot cross it.
     static var keyStep: Double { 0.0001 }
@@ -63,6 +63,11 @@ final class FillerChain<Host: FillerChainHost> {
     let prefix: String
     private let anchor: () -> Host.Item?
     private let placement: (_ probe: CGRect, _ anchor: CGRect) -> FillerPlacement
+    /// Decides whether freshly inserted (still small) fillers landed correctly,
+    /// given the item nearest the anchor and the item farthest from it. The
+    /// anchor may already be in the overflow at that point (its frame stale), so
+    /// the main chain checks the farthest filler against the arrow instead.
+    private var validate: (_ nearestToAnchor: Host.Item, _ farthestFromAnchor: Host.Item) -> Bool
     private let geometry: () -> Geometry
     private let initialGuess: (_ anchorFrame: CGRect) -> Double
 
@@ -80,13 +85,19 @@ final class FillerChain<Host: FillerChainHost> {
          anchor: @escaping () -> Host.Item?,
          geometry: @escaping () -> Geometry,
          initialGuess: @escaping (_ anchorFrame: CGRect) -> Double,
-         placement: @escaping (_ probe: CGRect, _ anchor: CGRect) -> FillerPlacement) {
+         placement: @escaping (_ probe: CGRect, _ anchor: CGRect) -> FillerPlacement,
+         validate: ((_ nearestToAnchor: Host.Item, _ farthestFromAnchor: Host.Item) -> Bool)? = nil) {
         self.host = host
         self.prefix = prefix
         self.anchor = anchor
         self.geometry = geometry
         self.initialGuess = initialGuess
         self.placement = placement
+        self.validate = validate ?? { _, _ in false }
+        if validate == nil {
+            // Default: the nearest filler sits right next to the anchor.
+            self.validate = { [weak self] nearest, _ in self?.placementOf(nearest) == .between }
+        }
     }
 
     /// Fillers are on the bar at full length.
@@ -114,10 +125,12 @@ final class FillerChain<Host: FillerChainHost> {
                 return
             }
             let geometry = self.geometry()
+            self.host?.log("FillerChain \(self.prefix): placing \(geometry.count) fillers \(geometry.lengths.map { Int($0) }) \(self.cachedKey.map { "at cached key \($0)" } ?? "after a key search")")
             if let cached = self.cachedKey {
                 self.place(at: cached, geometry: geometry, generation: generation) { [weak self] ok in
                     guard let self = self else { return }
                     if ok { finish(true); return }
+                    self.host?.log("FillerChain \(self.prefix): cached key \(cached) no longer lands right of the anchor; searching")
                     self.cachedKey = nil
                     self.discardItems()
                     self.waitForLayout(of: [], generation: generation) { [weak self] in
@@ -161,6 +174,7 @@ final class FillerChain<Host: FillerChainHost> {
                 guard let self = self else { return }
                 if ok {
                     self.cachedKey = key
+                    self.host?.log("FillerChain \(self.prefix): placed at key \(key)")
                 } else {
                     self.host?.log("FillerChain \(self.prefix): fillers did not land right of the anchor at key \(key)")
                     self.discardItems()
@@ -190,6 +204,7 @@ final class FillerChain<Host: FillerChainHost> {
                 self.probe = nil
                 switch result {
                 case .between:
+                    host.log("FillerChain \(self.prefix): key \(guess) found after \(attempts) probe(s)")
                     completion(guess)
                     return
                 case .tooFarRight: lo = guess; unknownStreak = 0
@@ -228,8 +243,14 @@ final class FillerChain<Host: FillerChainHost> {
             host.makeItem(prefix: prefix, key: key - FillerChain.keyStep * Double(i), length: FillerChain.insertionLength)
         }
         waitForLayout(of: items, generation: generation) { [weak self] in
-            guard let self = self, let host = self.host, let nearest = self.items.first else { return }
-            guard self.placementOf(nearest) == .between else { completion(false); return }
+            guard let self = self, let host = self.host, let nearest = self.items.first, let farthest = self.items.last else { return }
+            guard self.validate(nearest, farthest) else {
+                let frames = self.items.map { host.frame(of: $0).map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil" }
+                let anchorFrame = self.anchor().flatMap { host.frame(of: $0) }.map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil"
+                host.log("FillerChain \(self.prefix): validation failed; fillers (nearest anchor first) \(frames) anchor \(anchorFrame)")
+                completion(false)
+                return
+            }
             // items[0] has the highest key and sits next to the anchor; the flow
             // reaches items.last first.
             for (item, length) in zip(self.items.reversed(), geometry.lengths) { host.setLength(length, of: item) }
@@ -256,8 +277,9 @@ final class FillerChain<Host: FillerChainHost> {
     }
 
     /// Poll until every listed item has a frame and none changed between two
-    /// polls (layout is asynchronous in MenuBarAgent), or the poll budget runs
-    /// out. With no items this is a single settle delay.
+    /// polls (layout is asynchronous in MenuBarAgent and can take well over a
+    /// second for several new items), or the poll budget runs out. With no items
+    /// this is a single settle delay.
     private func waitForLayout(of watched: [Host.Item], generation: Int, _ done: @escaping () -> Void) {
         var last: [CGRect?] = []
         var stable = 0

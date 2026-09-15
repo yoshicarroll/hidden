@@ -92,6 +92,25 @@ two chains, cleanup after a failed placement, idempotent inserts, slow and
 never-attaching frames, and cancellation mid-search. Any behaviour change to
 the chain should come with a case here.
 
+## Diagnosing a bar that expanded by itself on macOS 27
+
+The macOS 27 code logs every collapse and expand with its trigger (arrow,
+auto-collapse timer, hover, launch, separators toggled), each screen
+configuration change, sleep/wake and screen sleep/wake, MenuBarAgent
+relaunches, each filler placement (cached key or search, attempts, result),
+rollbacks of a failed collapse, and a once-a-minute audit that reports when the
+bar is collapsed but the fillers are no longer next to the separator. Notice
+level persists, so the trail survives a reboot:
+
+```sh
+log show --last 6h --predicate 'subsystem == "com.dwarvesv.minimalbar"' --style compact
+log stream --predicate 'subsystem == "com.dwarvesv.minimalbar"'        # live
+```
+
+Read the lines just before the unexpected state. "expand (...)" names who
+asked for it; an "audit:" or "MenuBarAgent relaunched" line with no expand
+means the system re-laid the bar under a collapsed app.
+
 ## Verifying hiding on macOS 27 without screenshots
 
 `tools/macos27-hide-check.swift` reads what MenuBarAgent hosts on each display's
