@@ -25,5 +25,5 @@ Requires macOS 13 Ventura or later. (Pre-Ventura users: stay on
 - Pinned the HotKey dependency to an exact version and removed an unused file-access entitlement and dead code (no behavior change).
 
 ### Known / in progress
-- macOS 27: collapsing animates icons into the system overflow instead of hiding them instantly, and the free space the fillers occupy shows as an empty stretch of menu bar. Hidden icons are also reachable from the system's own » chevron while collapsed.
+- macOS 27: collapsing animates icons into the system overflow instead of hiding them instantly, and the free space the fillers occupy shows as an empty stretch of menu bar. macOS may show its own overflow chevron (« or ») at the left end of that stretch depending on the frontmost app's menu width; filler sizing keeps it away on wide displays, and when it does appear it lists the hidden icons.
 - New menu-bar icons can appear in the hidden zone because macOS inserts them at the far left; ⌘-drag them to the right of the separator (see the manual). A built-in pin is part of the planned redesign.

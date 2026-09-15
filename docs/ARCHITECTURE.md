@@ -103,9 +103,16 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   half the display width is dropped from layout entirely. Length inflation
   therefore does nothing (issue #360). On 27 `StatusBarController` instead
   collapses by inserting blank filler items between the arrow and the
-  separator, each shorter than half the narrowest display and enough of them to
-  exceed the widest, so on every bar one filler fails to fit and carries the
-  separator and everything left of it into the overflow. Item order on 27 is a
+  separator: one per distinct display width, each just under that display's
+  cliff, shortest next to the arrow, padded with the longest until the total
+  exceeds the widest display. On every bar the fillers under its cliff fill the
+  free space and the first that does not fit carries the separator and
+  everything left of it into the overflow; longer ones are dropped there and
+  change nothing. MenuBarAgent draws its overflow chevron (`«`) only when the
+  first item that does not fit still starts on screen; a later filler as long
+  as the widest display allows usually starts left of the screen edge, so the
+  chevron stays away on wide displays (measured against three frontmost apps
+  with different menu widths). Item order on 27 is a
   key equal to `display right edge - 40 - item right edge`; `MenuBarAgent`
   remembers the key of any item the user has Cmd-dragged, by app name plus
   autosave name, and otherwise reads `NSStatusItem Preferred Position

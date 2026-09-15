@@ -414,7 +414,7 @@ class StatusBarController {
 
     private func makeFillerChain(prefix: String, anchor: @escaping () -> NSStatusItem?) -> FillerChain<StatusBarController> {
         return FillerChain(host: self, prefix: prefix, anchor: anchor,
-                           geometry: { [weak self] in self?.fillerGeometry() ?? .init(length: 100, count: 1) },
+                           geometry: { [weak self] in self?.fillerGeometry() ?? .init(lengths: [100]) },
                            // Just below the anchor's geometric key is the natural
                            // first guess (larger keys sort further left).
                            initialGuess: { [weak self] anchorFrame in (self?.geometricPositionKey(ofFrame: anchorFrame) ?? 0) - 18 },
@@ -436,17 +436,29 @@ class StatusBarController {
         autoCollapseIfNeeded()
     }
 
-    // Filler length stays under the drop cliff (half the display width) of the
-    // narrowest display, with the same 64pt margin upstream measured against.
-    // Enough fillers to exceed the widest display guarantee that, on every bar,
-    // at least one filler fails to fit and carries the rest into the overflow.
+    // Filler lengths in layout order (next to the arrow first). Every display gets one filler
+    // sized just under its own drop cliff (half its width, with the 64pt margin
+    // upstream measured against), in ascending order, so on each display the
+    // fillers under its cliff fill the free space and the first that does not
+    // fit carries the rest into the overflow; longer ones are dropped there and
+    // change nothing. The ladder is then padded with the widest display's length
+    // until the total exceeds the widest display.
+    //
+    // Making the later fillers as long as the widest display allows also keeps
+    // the system's overflow chevron away: MenuBarAgent shows it when the first
+    // item that does not fit still lands partly on screen, and does not when
+    // that item would start left of the screen edge (measured; see
+    // docs/ARCHITECTURE.md).
     private func fillerGeometry() -> FillerChain<StatusBarController>.Geometry {
-        let widths = NSScreen.screens.map { $0.frame.width }
-        let narrowest = widths.min() ?? 1728
-        let widest = widths.max() ?? narrowest
-        let length = max(100, (narrowest / 2 - 64).rounded(.down))
-        let count = Int((widest / length).rounded(.up)) + 1
-        return .init(length: length, count: count)
+        let widths = Set(NSScreen.screens.map { $0.frame.width }).sorted()
+        let cliffLengths = widths.map { max(100, ($0 / 2 - 64).rounded(.down)) }
+        guard let longest = cliffLengths.last, let widest = widths.last else {
+            return .init(lengths: [800, 800, 800])
+        }
+        var lengths = cliffLengths
+        while lengths.reduce(0, +) <= widest { lengths.append(longest) }
+        lengths.append(longest)
+        return .init(lengths: lengths)
     }
 
     private func frameOf(_ item: NSStatusItem?) -> CGRect? {

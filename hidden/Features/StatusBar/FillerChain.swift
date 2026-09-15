@@ -36,9 +36,14 @@ protocol FillerChainHost: AnyObject {
 }
 
 final class FillerChain<Host: FillerChainHost> {
+    /// Full lengths of the fillers in layout order: the first is the filler the
+    /// right-to-left flow meets first (farthest from the anchor, next to the
+    /// arrow), the last sits right next to the anchor. Each stays under the drop
+    /// cliff of the display it is meant to overflow on; see
+    /// StatusBarController.fillerGeometry for how the ladder is built.
     struct Geometry: Equatable {
-        let length: CGFloat
-        let count: Int
+        let lengths: [CGFloat]
+        var count: Int { lengths.count }
     }
 
     static var maxAttempts: Int { 12 }
@@ -225,7 +230,9 @@ final class FillerChain<Host: FillerChainHost> {
         waitForLayout(of: items, generation: generation) { [weak self] in
             guard let self = self, let host = self.host, let nearest = self.items.first else { return }
             guard self.placementOf(nearest) == .between else { completion(false); return }
-            self.items.forEach { host.setLength(geometry.length, of: $0) }
+            // items[0] has the highest key and sits next to the anchor; the flow
+            // reaches items.last first.
+            for (item, length) in zip(self.items.reversed(), geometry.lengths) { host.setLength(length, of: item) }
             completion(true)
         }
     }

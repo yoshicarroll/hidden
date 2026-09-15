@@ -115,7 +115,7 @@ func makeBar(_ host: FakeHost) -> (expand: FakeItem, separator: FakeItem, hidden
 func makeChain(_ host: FakeHost, anchor: FakeItem, prefix: String = "fill", count: Int = 3) -> FillerChain<FakeHost> {
     FillerChain(host: host, prefix: prefix,
                 anchor: { anchor },
-                geometry: { .init(length: 300, count: count) },
+                geometry: { .init(lengths: Array(repeating: 300, count: count)) },
                 initialGuess: { anchorFrame in Double(FakeHost.rightEdge - anchorFrame.maxX) - 18 },
                 placement: adjacencyRule)
 }
@@ -260,7 +260,19 @@ func testRemoveDuringSearchCancelsSilently() {
     expect(result == true, "chain usable again")
 }
 
+func testLadderLengthsAppliedInOrder() {
+    print("ladder: lengths apply in layout order, the filler next to the arrow first")
+    let host = FakeHost(); let bar = makeBar(host)
+    let chain = FillerChain<FakeHost>(host: host, prefix: "fill", anchor: { bar.separator },
+                geometry: { .init(lengths: [300, 500, 700]) },
+                initialGuess: { f in Double(FakeHost.rightEdge - f.maxX) - 18 }, placement: adjacencyRule)
+    chain.insert(); host.run()
+    let byDistance = chain.items.sorted { host.layoutFrame(of: $0).minX > host.layoutFrame(of: $1).minX }
+    expect(byDistance.map(\.length) == [300, 500, 700], "rightmost filler gets lengths[0] (got \(byDistance.map(\.length)))")
+}
+
 testHappyPath()
+testLadderLengthsAppliedInOrder()
 testCachedKeyFastPathAndRecovery()
 testFinding1_independentGenerations()
 testFinding3_placementFailureCleansUp()
