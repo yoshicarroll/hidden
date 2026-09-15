@@ -21,7 +21,10 @@ ARCHITECTURE.md "Known architectural limits" for the measured behavior.
   with the icons simply gone.
 - **Key search cost.** The first collapse after launch, or after the separator is
   dragged, probes up to ~12 layout passes to find the filler key; later collapses
-  reuse the cached key. Consider persisting the key across launches.
+  reuse the cached key. Consider persisting the key across launches. Measured and
+  rejected: keeping permanent fillers and toggling `isVisible` (the approach in
+  #392). A hidden-then-shown item reappears at the far left on 27.0, both within a
+  session and across relaunch, so the fillers must be recreated each collapse.
 - **Stored-position drift.** MenuBarAgent restores the last dragged position of the
   arrow and separator by name; users upgrading from a broken 27 build may find the
   separator right of the arrow and must drag it once (documented in MANUAL.md).

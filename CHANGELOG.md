@@ -11,6 +11,7 @@ Requires macOS 13 Ventura or later. (Pre-Ventura users: stay on
 
 ### Fixed
 - macOS 27: hiding works again (#360). The re-architected menu bar drops any status item at or above half the display width and sends items that do not fit into a native overflow menu, so the old separator inflation did nothing. On 27 the app now collapses by inserting blank filler items between the arrow and the separator; the first one that does not fit carries the separator and everything left of it into the system overflow. Works with displays of different widths and notched Macs. macOS 26 and earlier keep the original mechanism.
+- The expand/collapse arrow now responds to accessibility presses (VoiceOver, AXPress), which arrive without a mouse event and were ignored.
 - Multi-display: the collapse width is now sized for the widest attached screen, so icons no longer leak on wider external monitors; the width re-applies on display hot-plug.
 - Auto-collapse no longer fires while you are interacting with the menu bar (the timer defers and re-arms while the pointer is in the bar).
 - The Preferences window no longer closes when auto-collapse fires with "use full menu bar on expanding" enabled (#170, #66, #151).

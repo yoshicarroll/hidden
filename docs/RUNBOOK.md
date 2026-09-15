@@ -78,3 +78,20 @@ mechanism break, and pointer-vs-open-menu limits. Memory reports (#361 et al.)
 have so far not reproduced as leaks (constraint-leak fix landed; `leaks` clean
 over toggle stress); re-check with a 24h+ uptime `footprint` sample before
 chasing further.
+
+## Verifying hiding on macOS 27 without screenshots
+
+`tools/macos27-hide-check.swift` reads what MenuBarAgent hosts on each display's
+bar. Items in the native overflow are absent from that list, while their own
+apps' accessibility trees keep reporting stale positions, so this is the
+reliable signal. The terminal running it needs Accessibility permission.
+
+```sh
+swift tools/macos27-hide-check.swift                                # dump hosted items per display
+swift tools/macos27-hide-check.swift --press --expect-visible Magnet 1Password   # toggle, then assert
+swift tools/macos27-hide-check.swift --press --expect-hidden Magnet 1Password
+```
+
+Names are the owning apps' names as printed in the dump. The `--press` option
+performs an accessibility press on Hidden Bar's arrow, waits for the layout to
+settle, then checks. Exit status is non-zero on any failed expectation.

@@ -268,7 +268,14 @@ class StatusBarController {
     }
     
     @objc func btnExpandCollapsePressed(sender: NSStatusBarButton) {
-        if let event = NSApp.currentEvent {
+        // An accessibility press (VoiceOver, AXPress from a test) arrives with no
+        // mouse event; treat it as a plain click so the control stays operable.
+        guard let event = NSApp.currentEvent,
+              event.type == .leftMouseUp || event.type == .rightMouseUp else {
+            self.expandCollapseIfNeeded()
+            return
+        }
+        if true {
 
             let isOptionKeyPressed = event.modifierFlags.contains(NSEvent.ModifierFlags.option)
 
