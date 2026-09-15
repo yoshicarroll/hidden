@@ -68,7 +68,7 @@ class StatusBarController {
     //     "legacy" key from "NSStatusItem Preferred Position <autosaveName>" in
     //     our defaults when the item appears, and never writes it back. Neither
     //     store is readable, so the key that puts a filler right of the separator
-    //     is found by bisection with a probe item (see insertFillers). Our own
+    //     is found by bisection with a probe item (see FillerChain). Our own
     //     items always carry a key: an item of ours WITHOUT one is flung to the far
     //     right the moment a keyed sibling (a filler) appears. The seeded keys
     //     only matter until the user first drags the item; they are deliberately
@@ -80,13 +80,12 @@ class StatusBarController {
         return false
     }
     private var isCollapsedByOverflow = false
-    private var fillers: [NSStatusItem] = []
-    private var alwaysHiddenFillers: [NSStatusItem] = []
-    private var fillerKeyCache: Double?
-    private var alwaysHiddenFillerKeyCache: Double?
-    // Bumped whenever fillers are torn down, so an in-flight key search or
-    // layout wait from a previous collapse cannot act on a stale state.
-    private var fillerGeneration = 0
+    // The two filler chains (see FillerChain.swift): one right of the separator
+    // that hides the regular section while collapsed, one right of the
+    // always-hidden separator that hides that section while expanded. Each owns
+    // its own cancellation generation, in-flight state and key cache.
+    private var fillerChain: FillerChain<StatusBarController>!
+    private var alwaysHiddenFillerChain: FillerChain<StatusBarController>!
     private static let positionKeyPrefix = "NSStatusItem Preferred Position "
     private static let expandCollapseAutosaveName = "hiddenbar_expandcollapse"
     private static let separateAutosaveName = "hiddenbar_separate"
@@ -164,6 +163,7 @@ class StatusBarController {
             btnSeparate.length = btnHiddenLength
         }
         setupUI()
+        if usesOverflowHiding { setupFillerChains() }
         restoreRemovedStatusItems()
         setupAlwayHideStatusBar()
         setupHoverToExpandIfEnabled()
@@ -214,9 +214,16 @@ class StatusBarController {
         let wasCollapsed = isCollapsed
         updateCollapsedLengths()
         if usesOverflowHiding {
-            // Filler geometry is derived from the display set, so rebuild the chain.
-            if wasCollapsed { removeFillers(); insertFillers() }
-            if alwaysHiddenFillersWanted { removeAlwaysHiddenFillers(); insertAlwaysHiddenFillers() }
+            // Filler geometry is derived from the display set, so rebuild whichever
+            // chain is in use: the regular one while collapsed, the always-hidden
+            // one while expanded (collapsing takes that section down anyway).
+            if wasCollapsed {
+                fillerChain.remove()
+                fillerChain.insert { [weak self] ok in if !ok { self?.rollBackFailedCollapse() } }
+            } else if alwaysHiddenFillersWanted {
+                alwaysHiddenFillerChain.remove()
+                alwaysHiddenFillerChain.insert()
+            }
             return
         }
         if wasCollapsed {
@@ -275,21 +282,19 @@ class StatusBarController {
             self.expandCollapseIfNeeded()
             return
         }
-        if true {
 
-            let isOptionKeyPressed = event.modifierFlags.contains(NSEvent.ModifierFlags.option)
+        let isOptionKeyPressed = event.modifierFlags.contains(NSEvent.ModifierFlags.option)
 
-            if event.type == NSEvent.EventType.leftMouseUp && !isOptionKeyPressed{
-                self.expandCollapseIfNeeded()
-            } else if event.type == NSEvent.EventType.rightMouseUp && !isOptionKeyPressed {
-                // Right-click opens the same context menu the separator has (#356),
-                // making settings reachable from the control everyone clicks.
-                // The separators/always-hidden toggle stays on option-click.
-                showContextMenu(from: sender)
-            } else {
-                // Both option+left and option+right land here: separators toggle.
-                self.showHideSeparatorsAndAlwayHideArea()
-            }
+        if event.type == NSEvent.EventType.leftMouseUp && !isOptionKeyPressed{
+            self.expandCollapseIfNeeded()
+        } else if event.type == NSEvent.EventType.rightMouseUp && !isOptionKeyPressed {
+            // Right-click opens the same context menu the separator has (#356),
+            // making settings reachable from the control everyone clicks.
+            // The separators/always-hidden toggle stays on option-click.
+            showContextMenu(from: sender)
+        } else {
+            // Both option+left and option+right land here: separators toggle.
+            self.showHideSeparatorsAndAlwayHideArea()
         }
     }
 
@@ -308,7 +313,7 @@ class StatusBarController {
         Preferences.areSeparatorsHidden = false
         
         if usesOverflowHiding {
-            removeAlwaysHiddenFillers()
+            alwaysHiddenFillerChain.remove()
             return
         }
         if !self.isCollapsed {
@@ -323,7 +328,7 @@ class StatusBarController {
         Preferences.areSeparatorsHidden = true
         
         if usesOverflowHiding {
-            if !isCollapsed { insertAlwaysHiddenFillers() }
+            if !isCollapsed { alwaysHiddenFillerChain.insert() }
             return
         }
         if !self.isCollapsed {
@@ -351,9 +356,12 @@ class StatusBarController {
         if usesOverflowHiding {
             // The always-hidden fillers would only add blank rows to the overflow
             // menu, since everything left of the chain ends up in there anyway.
-            removeAlwaysHiddenFillers()
-            insertFillers()
+            alwaysHiddenFillerChain.remove()
+            // Collapsed state is set now so a second click or the auto-collapse
+            // timer cannot start a rival placement; a failed placement rolls it
+            // back (rollBackFailedCollapse).
             isCollapsedByOverflow = true
+            fillerChain.insert { [weak self] ok in if !ok { self?.rollBackFailedCollapse() } }
         } else {
             btnSeparate.length = self.btnHiddenCollapseLength
         }
@@ -368,9 +376,9 @@ class StatusBarController {
     private func expandMenubar() {
         guard self.isCollapsed else {return}
         if usesOverflowHiding {
-            removeFillers()
+            fillerChain.remove()
             isCollapsedByOverflow = false
-            if alwaysHiddenFillersWanted { insertAlwaysHiddenFillers() }
+            if alwaysHiddenFillersWanted { alwaysHiddenFillerChain.insert() }
         } else {
             btnSeparate.length = btnHiddenLength
         }
@@ -393,66 +401,57 @@ class StatusBarController {
         startTimerToAutoHide()
     }
 
-    // MARK: macOS 27 fillers
+    // MARK: macOS 27 filler chains
 
     private var alwaysHiddenFillersWanted: Bool {
         return Preferences.alwaysHiddenSectionEnabled && Preferences.areSeparatorsHidden && btnAlwaysHidden != nil
+    }
+
+    private func setupFillerChains() {
+        fillerChain = makeFillerChain(prefix: "hiddenbar_fill") { [weak self] in self?.btnSeparate }
+        alwaysHiddenFillerChain = makeFillerChain(prefix: "hiddenbar_ahfill") { [weak self] in self?.btnAlwaysHidden }
+    }
+
+    private func makeFillerChain(prefix: String, anchor: @escaping () -> NSStatusItem?) -> FillerChain<StatusBarController> {
+        return FillerChain(host: self, prefix: prefix, anchor: anchor,
+                           geometry: { [weak self] in self?.fillerGeometry() ?? .init(length: 100, count: 1) },
+                           // Just below the anchor's geometric key is the natural
+                           // first guess (larger keys sort further left).
+                           initialGuess: { [weak self] anchorFrame in (self?.geometricPositionKey(ofFrame: anchorFrame) ?? 0) - 18 },
+                           placement: { [weak self] probe, anchor in self?.placement(ofProbe: probe, rightOf: anchor) ?? .unknown })
+    }
+
+    // A collapse whose fillers could not be placed: undo the collapsed state so
+    // the arrow, activation policy and auto-collapse timer match the bar, which
+    // still shows everything.
+    private func rollBackFailedCollapse() {
+        guard isCollapsedByOverflow else { return }
+        NSLog("HiddenBar27: collapse failed, rolling back to expanded")
+        isCollapsedByOverflow = false
+        btnExpandCollapse.button?.image = Assets.collapseImage
+        if Preferences.useFullStatusBarOnExpandEnabled {
+            NSApp.setActivationPolicy(.regular)
+        }
+        if alwaysHiddenFillersWanted { alwaysHiddenFillerChain.insert() }
+        autoCollapseIfNeeded()
     }
 
     // Filler length stays under the drop cliff (half the display width) of the
     // narrowest display, with the same 64pt margin upstream measured against.
     // Enough fillers to exceed the widest display guarantee that, on every bar,
     // at least one filler fails to fit and carries the rest into the overflow.
-    private func fillerGeometry() -> (length: CGFloat, count: Int) {
+    private func fillerGeometry() -> FillerChain<StatusBarController>.Geometry {
         let widths = NSScreen.screens.map { $0.frame.width }
         let narrowest = widths.min() ?? 1728
         let widest = widths.max() ?? narrowest
         let length = max(100, (narrowest / 2 - 64).rounded(.down))
         let count = Int((widest / length).rounded(.up)) + 1
-        return (length, count)
+        return .init(length: length, count: count)
     }
-
-    // Every filler gets a name MenuBarAgent has never seen. It remembers the
-    // position of any item that was on the bar during a Cmd-drag, by name, and
-    // from then on ignores the item's key; a reused name would pin the filler to
-    // wherever it sat during some earlier collapse. The key is removed from
-    // defaults once the item exists (macOS reads it when the name is assigned),
-    // so unique names do not accumulate there.
-    private func makeFiller(prefix: String, key: Double, length: CGFloat) -> NSStatusItem {
-        let name = "\(prefix)_\(UUID().uuidString)"
-        let defaultsKey = StatusBarController.positionKeyPrefix + name
-        UserDefaults.standard.set(key, forKey: defaultsKey)
-        let item = NSStatusBar.system.statusItem(withLength: length)
-        item.autosaveName = name
-        item.button?.isEnabled = false
-        item.button?.appearsDisabled = true
-        UserDefaults.standard.removeObject(forKey: defaultsKey)
-        return item
-    }
-
-    // Where a probe item landed relative to the anchor pair it should sit between.
-    private enum ProbePlacement { case between, tooFarRight, tooFarLeft, unknown }
 
     private func frameOf(_ item: NSStatusItem?) -> CGRect? {
         guard let button = item?.button, let window = button.window else { return nil }
         return window.convertToScreen(button.convert(button.bounds, to: nil))
-    }
-
-    // Poll until the given items' frames stop changing (layout is asynchronous,
-    // hosted in MenuBarAgent), then call back. Bounded to about a second.
-    private func waitForLayout(of items: [NSStatusItem], generation: Int, _ done: @escaping () -> Void) {
-        var last = items.map { frameOf($0) }
-        var stable = 0
-        var polls = 0
-        func poll() {
-            guard generation == self.fillerGeneration else { return }
-            polls += 1
-            let now = items.map { self.frameOf($0) }
-            if now == last { stable += 1 } else { stable = 0; last = now }
-            if stable >= 2 || polls >= 20 { done(); return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
     }
 
     // Two items are neighbours in the flow when only the 16pt inter-item spacing
@@ -468,195 +467,46 @@ class StatusBarController {
             && right.minX >= rightArea.minX - 1 && right.minX <= rightArea.minX + 80
     }
 
-    // Fillers must sort immediately right of the separator (between it and
-    // whatever follows, normally the expand button). The ordering key
-    // MenuBarAgent holds for the separator is not readable and, after drags on
-    // another display, does not match the geometric formula, so the key is found
-    // by bisection: a probe is inserted at a guess and its landing spot (left of
-    // the separator, right of it but not adjacent, or adjacent) steers the next
-    // guess. Frames are read from whichever display is active, which is
-    // consistent within one search. The result is cached and tried first, so a
-    // collapse normally costs one layout pass.
-    private func placementRightOfSeparator(_ probe: NSStatusItem) -> ProbePlacement {
-        guard let p = frameOf(probe), let s = frameOf(btnSeparate) else { return .unknown }
-        if p.maxX <= s.minX + 1 { return .tooFarLeft }
-        if p.minX >= s.maxX - 1 { return isAdjacent(left: s, right: p) ? .between : .tooFarRight }
+    // Fillers must sort immediately right of their anchor (the separator, or the
+    // always-hidden separator). Frames are read from whichever display is
+    // active, which is consistent within one search.
+    private func placement(ofProbe probe: CGRect, rightOf anchor: CGRect) -> FillerPlacement {
+        if probe.maxX <= anchor.minX + 1 { return .tooFarLeft }
+        if probe.minX >= anchor.maxX - 1 { return isAdjacent(left: anchor, right: probe) ? .between : .tooFarRight }
         return .unknown
-    }
-
-    // The always-hidden fillers sit immediately right of the always-hidden
-    // separator; the neighbour on the other side belongs to another app, so
-    // "between" is judged by adjacency to that separator.
-    private func placementRightOfAlwaysHidden(_ probe: NSStatusItem) -> ProbePlacement {
-        guard let p = frameOf(probe), let a = frameOf(btnAlwaysHidden) else { return .unknown }
-        if p.maxX <= a.minX + 1 { return .tooFarLeft }
-        if p.minX >= a.maxX - 1 { return isAdjacent(left: a, right: p) ? .between : .tooFarRight }
-        return .unknown
-    }
-
-    private func findKey(startingAt initial: Double, probeName: String, generation: Int,
-                         placement: @escaping (NSStatusItem) -> ProbePlacement,
-                         completion: @escaping (Double?) -> Void) {
-        var lo: Double? = nil
-        var hi: Double? = nil
-        var step = 40.0
-        var guess = initial
-        var attempts = 0
-        func attempt() {
-            guard generation == self.fillerGeneration else { return }
-            attempts += 1
-            let probe = self.makeFiller(prefix: probeName, key: guess, length: 8)
-            self.waitForLayout(of: [self.btnExpandCollapse, self.btnSeparate, probe], generation: generation) {
-                let result = placement(probe)
-                NSStatusBar.system.removeStatusItem(probe)
-                switch result {
-                case .between:
-                    completion(guess)
-                    return
-                case .tooFarRight: lo = guess
-                case .tooFarLeft: hi = guess
-                case .unknown: break
-                }
-                if attempts >= 12 {
-                    NSLog("HiddenBar27: key search %@ gave up after %d attempts (lo=%@ hi=%@)", probeName, attempts, String(describing: lo), String(describing: hi))
-                    completion(nil)
-                    return
-                }
-                if let l = lo, let h = hi {
-                    guess = (l + h) / 2
-                } else if let l = lo {
-                    guess = l + step; step *= 2
-                } else if let h = hi {
-                    guess = h - step; step *= 2
-                }
-                // Let the probe's removal settle before the next insertion.
-                self.waitForLayout(of: [self.btnExpandCollapse, self.btnSeparate], generation: generation) { attempt() }
-            }
-        }
-        attempt()
-    }
-
-    private func insertFillers() {
-        guard fillers.isEmpty else { return }
-        let generation = fillerGeneration
-        let geometry = fillerGeometry()
-        // Fast path: with a cached key the fillers are placed directly and their
-        // landing spot validated, one layout pass fewer than probing first.
-        if let cached = fillerKeyCache {
-            placeFillers(at: cached, geometry: geometry, generation: generation) { [weak self] placed in
-                guard let self = self, generation == self.fillerGeneration else { return }
-                if placed { return }
-                self.fillerKeyCache = nil
-                self.fillers.forEach { NSStatusBar.system.removeStatusItem($0) }
-                self.fillers = []
-                self.waitForLayout(of: [self.btnSeparate, self.btnExpandCollapse], generation: generation) { self.insertFillers() }
-            }
-            return
-        }
-        // Just below the separator's geometric key is the natural first guess
-        // (larger keys sort further left).
-        let initial = (geometricPositionKey(btnSeparate) ?? 0) - 18
-        findKey(startingAt: initial, probeName: "hiddenbar_fillprobe", generation: generation,
-                placement: { [weak self] probe in self?.placementRightOfSeparator(probe) ?? .unknown }) { [weak self] key in
-            guard let self = self, generation == self.fillerGeneration, self.fillers.isEmpty else { return }
-            guard let key = key else { NSLog("HiddenBar27: no key found right of the separator; nothing hidden"); return }
-            self.placeFillers(at: key, geometry: geometry, generation: generation) { [weak self] placed in
-                guard let self = self, generation == self.fillerGeneration else { return }
-                if placed { self.fillerKeyCache = key } else { NSLog("HiddenBar27: fillers did not land right of the separator at key %.3f", key) }
-            }
-        }
-    }
-
-    // An item that does not fit at insertion is re-keyed by macOS to the
-    // overflow boundary instead of taking its key, whereas resizing an existing
-    // item keeps its key. So the fillers appear at a width that fits, are
-    // checked (the leftmost one must sit right next to the separator), and are
-    // then grown to their real length.
-    private func placeFillers(at key: Double, geometry: (length: CGFloat, count: Int), generation: Int, completion: @escaping (Bool) -> Void) {
-        fillers = (0..<geometry.count).map { i in
-            makeFiller(prefix: "hiddenbar_fill", key: key + 0.001 * Double(i + 1), length: 8)
-        }
-        waitForLayout(of: fillers + [btnSeparate], generation: generation) {
-            guard generation == self.fillerGeneration, let leftmost = self.fillers.last else { return }
-            guard self.placementRightOfSeparator(leftmost) == .between else { completion(false); return }
-            self.fillers.forEach { $0.length = geometry.length }
-            completion(true)
-        }
-    }
-
-    private func removeFillers() {
-        fillerGeneration += 1
-        fillers.forEach { NSStatusBar.system.removeStatusItem($0) }
-        fillers = []
-    }
-
-    private func insertAlwaysHiddenFillers() {
-        guard alwaysHiddenFillers.isEmpty, alwaysHiddenFillersWanted, let alwaysHidden = btnAlwaysHidden else { return }
-        let generation = fillerGeneration
-        let geometry = fillerGeometry()
-        let initial = alwaysHiddenFillerKeyCache ?? ((geometricPositionKey(alwaysHidden) ?? 0) - 18)
-        findKey(startingAt: initial, probeName: "hiddenbar_ahfillprobe", generation: generation,
-                placement: { [weak self] probe in self?.placementRightOfAlwaysHidden(probe) ?? .unknown }) { [weak self] key in
-            guard let self = self, generation == self.fillerGeneration, self.alwaysHiddenFillers.isEmpty, self.alwaysHiddenFillersWanted else { return }
-            guard let key = key else { self.alwaysHiddenFillerKeyCache = nil; return }
-            self.alwaysHiddenFillers = (0..<geometry.count).map { i in
-                self.makeFiller(prefix: "hiddenbar_ahfill", key: key - 0.001 * Double(i + 1), length: 8)
-            }
-            self.waitForLayout(of: self.alwaysHiddenFillers + [alwaysHidden], generation: generation) {
-                guard generation == self.fillerGeneration, let rightmost = self.alwaysHiddenFillers.first else { return }
-                guard self.placementRightOfAlwaysHidden(rightmost) == .between else {
-                    NSLog("HiddenBar27: always-hidden fillers did not land right of their separator at key %.3f", key)
-                    self.alwaysHiddenFillerKeyCache = nil
-                    self.removeAlwaysHiddenFillers()
-                    return
-                }
-                self.alwaysHiddenFillerKeyCache = key
-                self.alwaysHiddenFillers.forEach { $0.length = geometry.length }
-            }
-        }
-    }
-
-    private func removeAlwaysHiddenFillers() {
-        fillerGeneration += 1
-        alwaysHiddenFillers.forEach { NSStatusBar.system.removeStatusItem($0) }
-        alwaysHiddenFillers = []
     }
 
     // MARK: macOS 27 position keys
 
-    private func savedPositionKey(_ autosaveName: String) -> Double? {
-        return UserDefaults.standard.object(forKey: StatusBarController.positionKeyPrefix + autosaveName) as? Double
-    }
-
-    private func setPositionKey(_ key: Double, for autosaveName: String) {
-        UserDefaults.standard.set(key, forKey: StatusBarController.positionKeyPrefix + autosaveName)
+    // Seed the key macOS reads when the item with this autosave name appears,
+    // unless one is already stored (a previous launch, or a fresh-install value).
+    private static func seedPositionKeyIfMissing(_ key: Double, for autosaveName: String) {
+        let defaultsKey = positionKeyPrefix + autosaveName
+        if UserDefaults.standard.object(forKey: defaultsKey) as? Double == nil {
+            UserDefaults.standard.set(key, forKey: defaultsKey)
+        }
     }
 
     // Creates a status item with its autosave name assigned immediately. On
-    // macOS 27 a missing position key is seeded first (a previous launch of this
-    // build leaves the real one; a fresh install gets the leftmost placement).
+    // macOS 27 a missing position key is seeded first; assigning the name later
+    // leaves the item where macOS first put it (measured).
     private static func makeStatusItem(length: CGFloat, autosaveName: String, freshKey: Double) -> NSStatusItem {
         if #available(macOS 27.0, *) {
-            let key = positionKeyPrefix + autosaveName
-            if UserDefaults.standard.object(forKey: key) as? Double == nil {
-                UserDefaults.standard.set(freshKey, forKey: key)
-            }
+            seedPositionKeyIfMissing(freshKey, for: autosaveName)
         }
         let item = NSStatusBar.system.statusItem(withLength: length)
         item.autosaveName = autosaveName
         return item
     }
 
-    // The key macOS 27 derives for an item: display right edge - 40 - item right
-    // edge, measured on the display that hosts the item's window.
-    private func geometricPositionKey(_ item: NSStatusItem?) -> Double? {
-        guard let button = item?.button, let window = button.window else { return nil }
-        let frame = window.convertToScreen(button.convert(button.bounds, to: nil))
+    // The key macOS 27 derives for an item at this frame: display right edge -
+    // 40 - item right edge, on the display that hosts the frame.
+    private func geometricPositionKey(ofFrame frame: CGRect) -> Double? {
         guard frame.width > 0,
               let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }) else { return nil }
         return Double(screen.frame.maxX - 40 - frame.maxX)
     }
-
+    
     private func startTimerToAutoHide() {
         timer?.invalidate()
         self.timer = Timer.scheduledTimer(withTimeInterval: Preferences.numberOfSecondForAutoHide, repeats: false) { [weak self] _ in
@@ -726,6 +576,7 @@ extension StatusBarController {
         updateCollapsedLengths()
 
         if Preferences.alwaysHiddenSectionEnabled {
+            if usesOverflowHiding { alwaysHiddenFillerChain.remove() }
             if let existing = self.btnAlwaysHidden {
                 NSStatusBar.system.removeStatusItem(existing)
             }
@@ -738,20 +589,62 @@ extension StatusBarController {
             }
             self.btnAlwaysHidden?.isVisible = true
             if usesOverflowHiding {
-                removeAlwaysHiddenFillers()
+                // A new separator has a new key; the chain waits for it to land.
+                alwaysHiddenFillerChain.invalidateCache()
                 if !isCollapsed && Preferences.areSeparatorsHidden {
-                    // Let the new separator land before deriving filler keys from it.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                        self?.insertAlwaysHiddenFillers()
-                    }
+                    alwaysHiddenFillerChain.insert()
                 }
             }
         } else {
-            removeAlwaysHiddenFillers()
+            if usesOverflowHiding { alwaysHiddenFillerChain.remove() }
             if let existing = self.btnAlwaysHidden {
                 NSStatusBar.system.removeStatusItem(existing)
             }
             self.btnAlwaysHidden = nil
         }
+    }
+}
+
+// MARK: - FillerChainHost
+
+extension StatusBarController: FillerChainHost {
+    typealias Item = NSStatusItem
+
+    // Every filler and probe gets a name MenuBarAgent has never seen. It
+    // remembers the position of any item that was on the bar during a Cmd-drag,
+    // by name, and from then on ignores the item's key; a reused name would pin
+    // the filler to wherever it sat during some earlier collapse. The key is
+    // removed from defaults once the item exists (macOS reads it when the name
+    // is assigned), so unique names do not accumulate there.
+    func makeItem(prefix: String, key: Double, length: CGFloat) -> NSStatusItem {
+        let name = "\(prefix)_\(UUID().uuidString)"
+        let defaultsKey = StatusBarController.positionKeyPrefix + name
+        UserDefaults.standard.set(key, forKey: defaultsKey)
+        let item = NSStatusBar.system.statusItem(withLength: length)
+        item.autosaveName = name
+        item.button?.isEnabled = false
+        item.button?.appearsDisabled = true
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        return item
+    }
+
+    func removeItem(_ item: NSStatusItem) {
+        NSStatusBar.system.removeStatusItem(item)
+    }
+
+    func setLength(_ length: CGFloat, of item: NSStatusItem) {
+        item.length = length
+    }
+
+    func frame(of item: NSStatusItem) -> CGRect? {
+        return frameOf(item)
+    }
+
+    func after(_ seconds: TimeInterval, _ block: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: block)
+    }
+
+    func log(_ message: String) {
+        NSLog("HiddenBar27: %@", message)
     }
 }

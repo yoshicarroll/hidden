@@ -25,6 +25,10 @@ ARCHITECTURE.md "Known architectural limits" for the measured behavior.
   rejected: keeping permanent fillers and toggling `isVisible` (the approach in
   #392). A hidden-then-shown item reappears at the far left on 27.0, both within a
   session and across relaunch, so the fillers must be recreated each collapse.
+- **Always-hidden section on 27.** Exercised once via the argument domain
+  (`-alwaysHiddenSectionEnabled YES -areSeparatorsHidden YES`): its chain places
+  and the section, separator included, goes into the overflow while expanded.
+  Not yet tested with real icons dragged into that section.
 - **Stored-position drift.** MenuBarAgent restores the last dragged position of the
   arrow and separator by name; users upgrading from a broken 27 build may find the
   separator right of the arrow and must drag it once (documented in MANUAL.md).

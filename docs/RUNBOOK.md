@@ -79,6 +79,19 @@ have so far not reproduced as leaks (constraint-leak fix landed; `leaks` clean
 over toggle stress); re-check with a 24h+ uptime `footprint` sample before
 chasing further.
 
+## Unit tests for the macOS 27 filler chain
+
+```sh
+sh tests/run-filler-chain-tests.sh
+```
+
+Compiles `FillerChain.swift` with `tests/FillerChainTests/main.swift` (plain
+`swiftc`, no test target) and runs the chain against a simulated menu bar:
+happy path, cached-key fast path and recovery, independent cancellation of the
+two chains, cleanup after a failed placement, idempotent inserts, slow and
+never-attaching frames, and cancellation mid-search. Any behaviour change to
+the chain should come with a case here.
+
 ## Verifying hiding on macOS 27 without screenshots
 
 `tools/macos27-hide-check.swift` reads what MenuBarAgent hosts on each display's

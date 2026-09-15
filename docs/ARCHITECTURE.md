@@ -114,8 +114,11 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   probe, cached, and re-validated on each collapse; fillers appear at 8pt and
   are then grown, because an item that does not fit at insertion is re-keyed to
   the overflow boundary. Every item of ours carries a key, since an unkeyed
-  item is flung to the far right when a keyed sibling appears. Measured on
-  27.0 (26A428); see the comments in `StatusBarController.swift`.
+  item is flung to the far right when a keyed sibling appears. The state
+  machine lives in `FillerChain.swift`, instantiated once for the separator and
+  once for the always-hidden separator, and talks to the bar only through
+  `FillerChainHost`, so `tests/run-filler-chain-tests.sh` runs it against a
+  simulated bar. Measured on 27.0 (26A428); see the comments in both files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
   so the collapse can still fire there.
