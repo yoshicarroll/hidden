@@ -133,7 +133,11 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   which can take over a second for several items, so only frames inside the
   menu bar strip count as attached. Placement is validated against the arrow,
   not the separator, because on a crowded bar the fillers push the separator
-  itself into the overflow, which is the intended result. Measured on 27.0
+  itself into the overflow, which is the intended result. Display changes
+  arrive in bursts (a wake brings the built-in display up alone, then the
+  externals a second later) while MenuBarAgent re-lays every bar, so the
+  handler waits for the configuration to settle and a failed placement is
+  retried with backoff before the collapse is rolled back. Measured on 27.0
   (26A428); see the comments in both files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,

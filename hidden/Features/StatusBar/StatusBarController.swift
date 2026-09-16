@@ -15,6 +15,13 @@ class StatusBarController {
     // (notice level persists; see docs/RUNBOOK.md).
     static let diagnostics = Logger(subsystem: "com.dwarvesv.minimalbar", category: "macOS27")
     private var stateAuditTimer: Timer?
+    private var screenChangeTimer: Timer?
+    private var placementRetryTimer: Timer?
+    // Delays before retrying a collapse whose fillers could not be placed. A
+    // display reconfiguration (wake, hot-plug) re-lays every bar for a second or
+    // two, during which frames are unreliable; giving up on the first failure
+    // left the bar expanded after wake.
+    private static let placementRetryDelays: [TimeInterval] = [2, 5, 10]
     
     //MARK: - Variables
     private var timer:Timer? = nil
@@ -187,6 +194,8 @@ class StatusBarController {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         stateAuditTimer?.invalidate()
+        screenChangeTimer?.invalidate()
+        placementRetryTimer?.invalidate()
         hoverDwellTimer?.invalidate()
         if let monitor = hoverMonitor {
             NSEvent.removeMonitor(monitor)
@@ -225,15 +234,12 @@ class StatusBarController {
         if usesOverflowHiding {
             let screens = NSScreen.screens.map { "\(Int($0.frame.minX))+\(Int($0.frame.width))" }.joined(separator: " ")
             StatusBarController.diagnostics.notice("screens changed: [\(screens, privacy: .public)] collapsed=\(wasCollapsed)")
-            // Filler geometry is derived from the display set, so rebuild whichever
-            // chain is in use: the regular one while collapsed, the always-hidden
-            // one while expanded (collapsing takes that section down anyway).
-            if wasCollapsed {
-                fillerChain.remove()
-                fillerChain.insert { [weak self] ok in if !ok { self?.rollBackFailedCollapse() } }
-            } else if alwaysHiddenFillersWanted {
-                alwaysHiddenFillerChain.remove()
-                alwaysHiddenFillerChain.insert()
+            // Displays come and go in bursts (wake, hot-plug) and MenuBarAgent
+            // re-lays every bar meanwhile; act once the configuration has been
+            // stable for a moment.
+            screenChangeTimer?.invalidate()
+            screenChangeTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+                self?.rebuildFillersAfterScreenChange()
             }
             return
         }
@@ -376,7 +382,7 @@ class StatusBarController {
             // timer cannot start a rival placement; a failed placement rolls it
             // back (rollBackFailedCollapse).
             isCollapsedByOverflow = true
-            fillerChain.insert { [weak self] ok in if !ok { self?.rollBackFailedCollapse() } }
+            placeFillersWithRetry(attempt: 0, reason: reason)
         } else {
             btnSeparate.length = self.btnHiddenCollapseLength
         }
@@ -392,6 +398,7 @@ class StatusBarController {
         guard self.isCollapsed else {return}
         if usesOverflowHiding { StatusBarController.diagnostics.notice("expand (\(reason, privacy: .public))") }
         if usesOverflowHiding {
+            placementRetryTimer?.invalidate()
             fillerChain.remove()
             isCollapsedByOverflow = false
             if alwaysHiddenFillersWanted { alwaysHiddenFillerChain.insert() }
@@ -415,6 +422,44 @@ class StatusBarController {
         guard !isCollapsed else { return }
 
         startTimerToAutoHide()
+    }
+
+    // Filler geometry is derived from the display set, so rebuild whichever chain
+    // is in use: the regular one while collapsed, the always-hidden one while
+    // expanded (collapsing takes that section down anyway).
+    private func rebuildFillersAfterScreenChange() {
+        StatusBarController.diagnostics.notice("screens settled; rebuilding fillers (collapsed=\(self.isCollapsed))")
+        if isCollapsed {
+            fillerChain.remove()
+            placeFillersWithRetry(attempt: 0, reason: "screens changed")
+        } else if alwaysHiddenFillersWanted {
+            alwaysHiddenFillerChain.remove()
+            alwaysHiddenFillerChain.insert()
+        }
+    }
+
+    // Place the regular fillers; on failure retry with backoff while the bar is
+    // still meant to be collapsed, and only then roll back to expanded.
+    private func placeFillersWithRetry(attempt: Int, reason: String) {
+        placementRetryTimer?.invalidate()
+        fillerChain.insert { [weak self] ok in
+            guard let self = self, self.isCollapsedByOverflow else { return }
+            if ok {
+                if attempt > 0 { StatusBarController.diagnostics.notice("fillers placed on retry \(attempt) (\(reason, privacy: .public))") }
+                return
+            }
+            guard attempt < StatusBarController.placementRetryDelays.count else {
+                self.rollBackFailedCollapse()
+                return
+            }
+            let delay = StatusBarController.placementRetryDelays[attempt]
+            StatusBarController.diagnostics.notice("filler placement failed (\(reason, privacy: .public)); retry \(attempt + 1) in \(Int(delay))s")
+            self.placementRetryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                guard let self = self, self.isCollapsedByOverflow else { return }
+                self.fillerChain.remove()
+                self.placeFillersWithRetry(attempt: attempt + 1, reason: reason)
+            }
+        }
     }
 
     // MARK: macOS 27 diagnostics
@@ -465,15 +510,19 @@ class StatusBarController {
     }
 
     private func setupFillerChains() {
-        // The regular chain validates against the arrow: on a crowded bar the
-        // separator itself is pushed into the overflow by the fillers (which is
-        // the intended result), so its frame is no longer usable as a reference.
+        // The regular chain accepts either reference: the filler nearest the
+        // separator right next to it, or the filler farthest from it right next
+        // to the arrow. On a crowded bar the fillers push the separator itself
+        // into the overflow (the intended result) and its frame goes stale; on a
+        // notched display the system's overflow chevron can sit between the
+        // fillers and the arrow. One of the two is always usable.
         fillerChain = makeFillerChain(prefix: "hiddenbar_fill", anchor: { [weak self] in self?.btnSeparate },
-                                      validate: { [weak self] _, farthest in
-                                          guard let self = self, let f = self.frameOf(farthest), let e = self.frameOf(self.btnExpandCollapse) else { return false }
-                                          let ok = self.isAdjacent(left: f, right: e)
-                                          if !ok { StatusBarController.diagnostics.notice("validate: arrow \(Int(e.minX))-\(Int(e.maxX)) farthest filler \(Int(f.minX))-\(Int(f.maxX)) screens item=\(String(describing: farthest.button?.window?.screen?.frame.minX), privacy: .public) arrow=\(String(describing: self.btnExpandCollapse.button?.window?.screen?.frame.minX), privacy: .public)") }
-                                          return ok
+                                      validate: { [weak self] nearest, farthest in
+                                          guard let self = self else { return false }
+                                          if let n = self.frameOf(nearest), let a = self.frameOf(self.btnSeparate), self.isAdjacent(left: a, right: n) { return true }
+                                          if let f = self.frameOf(farthest), let e = self.frameOf(self.btnExpandCollapse), self.isAdjacent(left: f, right: e) { return true }
+                                          StatusBarController.diagnostics.notice("validate: separator \(String(describing: self.frameOf(self.btnSeparate)), privacy: .public) nearest \(String(describing: self.frameOf(nearest)), privacy: .public) farthest \(String(describing: self.frameOf(farthest)), privacy: .public) arrow \(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public)")
+                                          return false
                                       })
         // The always-hidden chain's right-hand neighbour belongs to another app,
         // so it keeps the default check against its own separator.
@@ -545,15 +594,14 @@ class StatusBarController {
     private func frameOf(_ item: NSStatusItem?) -> CGRect? {
         guard let button = item?.button, let window = button.window else { return nil }
         var frame = window.convertToScreen(button.convert(button.bounds, to: nil))
-        // A freshly created item reports a placeholder frame near the origin of
-        // its screen until MenuBarAgent lays it out; only a frame inside the
-        // screen's menu bar strip is a real position.
-        if let itemScreen = window.screen {
-            let strip = CGRect(x: itemScreen.frame.minX, y: itemScreen.visibleFrame.maxY - 1,
-                               width: itemScreen.frame.width, height: itemScreen.frame.maxY - itemScreen.visibleFrame.maxY + 2)
-            guard strip.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return nil }
-        }
-        if let itemScreen = window.screen, let reference = referenceScreen, itemScreen != reference {
+        // A freshly created item reports a placeholder frame near the origin, with
+        // no screen, until MenuBarAgent lays it out; only a frame on a screen and
+        // inside that screen's menu bar strip is a real position.
+        guard let itemScreen = window.screen else { return nil }
+        let strip = CGRect(x: itemScreen.frame.minX, y: itemScreen.visibleFrame.maxY - 1,
+                           width: itemScreen.frame.width, height: itemScreen.frame.maxY - itemScreen.visibleFrame.maxY + 2)
+        guard strip.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return nil }
+        if let reference = referenceScreen, itemScreen != reference {
             frame.origin.x += reference.frame.maxX - itemScreen.frame.maxX
             frame.origin.y += reference.frame.maxY - itemScreen.frame.maxY
         }

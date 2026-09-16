@@ -136,9 +136,14 @@ func makeBar(_ host: FakeHost) -> (expand: FakeItem, separator: FakeItem, hidden
     return (e, s, [h1, h2])
 }
 
-/// Validation like the app's regular chain: the filler farthest from the separator sits right next to the arrow.
-func validateAgainst(_ arrow: FakeItem, _ host: FakeHost) -> (FakeItem, FakeItem) -> Bool {
-    return { _, farthest in
+/// Validation like the app's regular chain: the nearest filler right next to the separator, or the
+/// farthest filler right next to the arrow.
+func validateAgainst(_ arrow: FakeItem, _ host: FakeHost, separator: FakeItem? = nil) -> (FakeItem, FakeItem) -> Bool {
+    return { nearest, farthest in
+        if let sep = separator, let n = host.frame(of: nearest), let a = host.frame(of: sep), host.fits(sep) {
+            let gap = n.minX - a.maxX
+            if gap >= -1 && gap <= 24 { return true }
+        }
         guard let f = host.frame(of: farthest), let e = host.frame(of: arrow) else { return false }
         let gap = e.minX - f.maxX
         return gap >= -1 && gap <= 24

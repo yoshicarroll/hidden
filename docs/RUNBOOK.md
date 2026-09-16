@@ -108,8 +108,10 @@ log stream --predicate 'subsystem == "com.dwarvesv.minimalbar"'        # live
 ```
 
 Read the lines just before the unexpected state. "expand (...)" names who
-asked for it; an "audit:" or "MenuBarAgent relaunched" line with no expand
-means the system re-laid the bar under a collapsed app.
+asked for it; "collapse failed, rolling back to expanded" means every
+placement retry failed (the preceding "filler placement failed ... retry"
+lines show the attempts); an "audit:" or "MenuBarAgent relaunched" line with
+no expand means the system re-laid the bar under a collapsed app.
 
 ## Verifying hiding on macOS 27 without screenshots
 
