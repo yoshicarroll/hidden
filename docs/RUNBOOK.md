@@ -111,7 +111,10 @@ Read the lines just before the unexpected state. "expand (...)" names who
 asked for it; "collapse failed, rolling back to expanded" means every
 placement retry failed (the preceding "filler placement failed ... retry"
 lines show the attempts); an "audit:" or "MenuBarAgent relaunched" line with
-no expand means the system re-laid the bar under a collapsed app.
+no expand means the system re-laid the bar under a collapsed app. An arrow that is
+missing on one display only (its slot is empty, the other bars show it) is a
+hosted scene that lost its glyph when that display reconnected; the app redraws
+it after displays settle, and a relaunch also restores it.
 
 ## Verifying hiding on macOS 27 without screenshots
 

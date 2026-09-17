@@ -429,6 +429,7 @@ class StatusBarController {
     // expanded (collapsing takes that section down anyway).
     private func rebuildFillersAfterScreenChange() {
         StatusBarController.diagnostics.notice("screens settled; rebuilding fillers (collapsed=\(self.isCollapsed))")
+        redrawArrow()
         if isCollapsed {
             fillerChain.remove()
             placeFillersWithRetry(attempt: 0, reason: "screens changed")
@@ -459,6 +460,19 @@ class StatusBarController {
                 self.fillerChain.remove()
                 self.placeFillersWithRetry(attempt: attempt + 1, reason: reason)
             }
+        }
+    }
+
+    // After a display reconnects, the arrow's hosted scene on that display has
+    // been seen to keep its slot but lose its glyph. Re-assigning the image
+    // (cleared first so the change is not coalesced away) makes MenuBarAgent
+    // refresh the scene content on every display.
+    private func redrawArrow() {
+        guard let button = btnExpandCollapse.button else { return }
+        button.image = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self = self, let button = self.btnExpandCollapse.button else { return }
+            button.image = self.isCollapsed ? Assets.expandImage : Assets.collapseImage
         }
     }
 
@@ -499,7 +513,9 @@ class StatusBarController {
             return
         }
         if !isAdjacent(left: f, right: e) {
-            StatusBarController.diagnostics.error("audit: collapsed but the filler next to the arrow is not adjacent: filler=\(Int(f.minX))-\(Int(f.maxX)) arrow=\(Int(e.minX))-\(Int(e.maxX))")
+            let fs = farthest.button?.window?.screen.map { Int($0.frame.minX) } ?? -1, es = btnExpandCollapse.button?.window?.screen.map { Int($0.frame.minX) } ?? -1
+            StatusBarController.diagnostics.error("audit: collapsed but the filler next to the arrow is not adjacent: filler=\(Int(f.minX))-\(Int(f.maxX)) (screen \(fs)) arrow=\(Int(e.minX))-\(Int(e.maxX)) (screen \(es)); redrawing arrow")
+            redrawArrow()
         }
     }
 
