@@ -66,7 +66,7 @@ To undo any of them: `defaults delete com.dwarvesv.minimalbar <key>`.
 | Login item missing after denying it once | System Settings > General > Login Items: re-enable Hidden Bar, then toggle the pref off/on |
 | A ghost "LauncherApplication" login item from old versions | Launch the current version once; it deauthorizes the legacy item automatically |
 | App language stuck | See the `AppleLanguages` command above, or System Settings > General > Language & Region > Applications |
-| Nothing hides on macOS 27 and the separator sits to the right of the arrow | ⌘-drag the `\|` separator to the left of the `‹` arrow once; macOS 27 remembers where you last dragged an item and can restore a stale arrangement from an older version |
+| Nothing hides on macOS 27 and the separator sits to the right of the arrow | The app moves the arrow back to the right of the separator by itself at launch or on the next collapse; if that fails (logged), ⌘-drag the `\|` separator to the left of the `‹` arrow once |
 | Icons take a moment and "fly" into place when collapsing on macOS 27 | Expected; macOS 27 moves hidden icons into its own overflow menu and animates that. The system's » chevron also lists them while collapsed |
 | A new or just-updated app's icon shows up already hidden | Expected, see "Why new icons start hidden" below; ⌘-drag it to the right of the separator once |
 

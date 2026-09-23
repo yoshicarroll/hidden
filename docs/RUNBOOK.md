@@ -111,10 +111,13 @@ Read the lines just before the unexpected state. "expand (...)" names who
 asked for it; "collapse failed, rolling back to expanded" means every
 placement retry failed (the preceding "filler placement failed ... retry"
 lines show the attempts); an "audit:" or "MenuBarAgent relaunched" line with
-no expand means the system re-laid the bar under a collapsed app. An arrow that is
-missing on one display only (its slot is empty, the other bars show it) is a
-hosted scene that lost its glyph when that display reconnected; the app redraws
-it after displays settle, and a relaunch also restores it.
+no expand means the system re-laid the bar under a collapsed app. "arrow is left of the
+separator" followed by "arrow re-registered as hiddenbar_expandcollapse_N" is
+the self-heal: the arrow takes a fresh autosave name at a key right of the
+separator, because macOS 27 remembers positions by name and offers no way to
+move an item. Never act on the audit from code: clearing and re-setting the
+arrow's image to force a redraw was tried and MenuBarAgent re-keyed the arrow
+into the overflow.
 
 ## Verifying hiding on macOS 27 without screenshots
 

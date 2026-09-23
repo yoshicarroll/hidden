@@ -137,8 +137,12 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   arrive in bursts (a wake brings the built-in display up alone, then the
   externals a second later) while MenuBarAgent re-lays every bar, so the
   handler waits for the configuration to settle and a failed placement is
-  retried with backoff before the collapse is rolled back. Measured on 27.0
-  (26A428); see the comments in both files.
+  retried with backoff before the collapse is rolled back. Because MenuBarAgent
+  remembers positions by autosave name and nothing can move an item, an arrow
+  found left of the separator is re-registered under a fresh name
+  (`hiddenbar_expandcollapse_N`, generation persisted) at a key the probe
+  search finds right of the separator. Measured on 27.0 (26A428); see the
+  comments in both files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
   so the collapse can still fire there.

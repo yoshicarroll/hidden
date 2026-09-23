@@ -153,6 +153,25 @@ final class FillerChain<Host: FillerChainHost> {
     /// Forget the cached key, e.g. after the anchor was moved.
     func invalidateCache() { cachedKey = nil }
 
+    /// Run only the key search: find a key whose item lands immediately right of
+    /// the anchor, without placing any fillers. Used to re-register another item
+    /// next to the anchor. Not idempotent with insert(); callers keep the chain
+    /// otherwise idle.
+    func locateKey(completion: @escaping (Double?) -> Void) {
+        guard !isInFlight else { completion(nil); return }
+        isInFlight = true
+        let generation = self.generation
+        waitForAnchor(generation: generation) { [weak self] anchorFrame in
+            guard let self = self else { return }
+            guard let anchorFrame = anchorFrame else { self.isInFlight = false; completion(nil); return }
+            self.findKey(startingAt: self.initialGuess(anchorFrame), generation: generation) { [weak self] key in
+                guard let self = self, generation == self.generation else { return }
+                self.isInFlight = false
+                completion(key)
+            }
+        }
+    }
+
     // MARK: - Steps
 
     private func discardItems() {

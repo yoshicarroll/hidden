@@ -31,8 +31,9 @@ class StatusBarController {
     // On macOS 27 the position key must be in defaults and the autosave name set
     // at creation, before the button is configured; assigning the name later
     // leaves the item where macOS first put it (measured, see the 27 notes below).
-    private let btnExpandCollapse = StatusBarController.makeStatusItem(length: NSStatusItem.variableLength,
-                                                                        autosaveName: StatusBarController.expandCollapseAutosaveName,
+    // `var` only so healArrowPosition() can re-register it under a fresh name.
+    private var btnExpandCollapse = StatusBarController.makeStatusItem(length: NSStatusItem.variableLength,
+                                                                        autosaveName: StatusBarController.currentArrowAutosaveName,
                                                                         freshKey: StatusBarController.freshExpandCollapseKey)
     private let btnSeparate = StatusBarController.makeStatusItem(length: 1,
                                                                  autosaveName: StatusBarController.separateAutosaveName,
@@ -101,6 +102,18 @@ class StatusBarController {
     private var alwaysHiddenFillerChain: FillerChain<StatusBarController>!
     private static let positionKeyPrefix = "NSStatusItem Preferred Position "
     private static let expandCollapseAutosaveName = "hiddenbar_expandcollapse"
+    // macOS 27 remembers an item's position by autosave name and offers no way to
+    // move it. When the arrow ends up left of the separator (a stale arrangement
+    // from an older build, or MenuBarAgent re-keying it), the only way to put it
+    // back is to register it under a name MenuBarAgent has never seen, at a key
+    // found right of the separator. The generation persists so the arrow keeps
+    // that name, and the position the user gives it, across launches.
+    private static let arrowNameGenerationKey = "hiddenbar_arrowNameGeneration"
+    private static var currentArrowAutosaveName: String {
+        let generation = UserDefaults.standard.integer(forKey: arrowNameGenerationKey)
+        return generation == 0 ? expandCollapseAutosaveName : "\(expandCollapseAutosaveName)_\(generation)"
+    }
+    private var arrowHealAttempted = false
     private static let separateAutosaveName = "hiddenbar_separate"
     private static let alwaysHiddenAutosaveName = "hiddenbar_terminate"
     // Fresh install on 27: no saved keys yet. Large keys sort left of every other
@@ -112,6 +125,11 @@ class StatusBarController {
     private static let freshAlwaysHiddenKey = 5080.0
     
     private var isBtnSeparateValidPosition: Bool {
+        if usesOverflowHiding {
+            // Frames may come from different displays; compare in one screen space.
+            guard let e = frameOf(btnExpandCollapse), let s = frameOf(btnSeparate) else { return false }
+            return Constant.isUsingLTRLanguage ? e.minX >= s.minX : e.minX <= s.minX
+        }
         guard
             let btnExpandCollapseX = self.btnExpandCollapse.button?.getOrigin?.x,
             let btnSeparateX = self.btnSeparate.button?.getOrigin?.x
@@ -183,7 +201,12 @@ class StatusBarController {
         NotificationCenter.default.addObserver(self, selector: #selector(handleScreenParametersChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         if usesOverflowHiding { setupDiagnostics() }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.collapseMenuBar(reason: "launch")
+            guard let self = self else { return }
+            if self.usesOverflowHiding && !self.isBtnSeparateValidPosition {
+                self.healArrowPosition { self.collapseMenuBar(reason: "launch") }
+            } else {
+                self.collapseMenuBar(reason: "launch")
+            }
         }
         
         if Preferences.areSeparatorsHidden {hideSeparators()}
@@ -281,13 +304,7 @@ class StatusBarController {
 
         updateAutoCollapseMenuTitle()
         
-        if let button = btnExpandCollapse.button {
-            button.image = Assets.collapseImage
-            button.target = self
-            
-            button.action = #selector(self.btnExpandCollapsePressed(sender:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        }
+        configureExpandCollapseButton()
         
     }
     
@@ -368,6 +385,10 @@ class StatusBarController {
         guard self.isBtnSeparateValidPosition && !self.isCollapsed else {
             if usesOverflowHiding {
                 StatusBarController.diagnostics.notice("collapse skipped (\(reason, privacy: .public)): validPosition=\(self.isBtnSeparateValidPosition) collapsed=\(self.isCollapsed)")
+                if !isCollapsed && !isBtnSeparateValidPosition && !arrowHealAttempted {
+                    healArrowPosition { [weak self] in self?.collapseMenuBar(reason: reason) }
+                    return
+                }
             }
             autoCollapseIfNeeded()
             return
@@ -429,7 +450,6 @@ class StatusBarController {
     // expanded (collapsing takes that section down anyway).
     private func rebuildFillersAfterScreenChange() {
         StatusBarController.diagnostics.notice("screens settled; rebuilding fillers (collapsed=\(self.isCollapsed))")
-        redrawArrow()
         if isCollapsed {
             fillerChain.remove()
             placeFillersWithRetry(attempt: 0, reason: "screens changed")
@@ -463,17 +483,48 @@ class StatusBarController {
         }
     }
 
-    // After a display reconnects, the arrow's hosted scene on that display has
-    // been seen to keep its slot but lose its glyph. Re-assigning the image
-    // (cleared first so the change is not coalesced away) makes MenuBarAgent
-    // refresh the scene content on every display.
-    private func redrawArrow() {
-        guard let button = btnExpandCollapse.button else { return }
-        button.image = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            guard let self = self, let button = self.btnExpandCollapse.button else { return }
-            button.image = self.isCollapsed ? Assets.expandImage : Assets.collapseImage
+    // MARK: macOS 27 arrow healing
+
+    // The arrow is left of the separator, so nothing can be hidden. Re-register
+    // it under a fresh autosave name at a key immediately right of the separator
+    // (found with the filler chain's probe search), then rebuild the button.
+    // Once per launch; if the search fails the arrangement is left for the user
+    // to fix by dragging, as before.
+    private func healArrowPosition(completion: @escaping () -> Void) {
+        guard !arrowHealAttempted else { completion(); return }
+        arrowHealAttempted = true
+        StatusBarController.diagnostics.error("arrow is left of the separator: arrow=\(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public) separator=\(String(describing: self.frameOf(self.btnSeparate)), privacy: .public); re-registering it right of the separator")
+        fillerChain.locateKey { [weak self] key in
+            guard let self = self else { return }
+            guard let key = key else {
+                StatusBarController.diagnostics.error("arrow healing: no key found right of the separator; leaving the arrangement for the user to fix")
+                completion()
+                return
+            }
+            let generation = UserDefaults.standard.integer(forKey: StatusBarController.arrowNameGenerationKey) + 1
+            UserDefaults.standard.set(generation, forKey: StatusBarController.arrowNameGenerationKey)
+            let name = StatusBarController.currentArrowAutosaveName
+            NSStatusBar.system.removeStatusItem(self.btnExpandCollapse)
+            UserDefaults.standard.set(key, forKey: StatusBarController.positionKeyPrefix + name)
+            self.btnExpandCollapse = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            self.btnExpandCollapse.autosaveName = name
+            self.configureExpandCollapseButton()
+            self.fillerChain.invalidateCache()
+            StatusBarController.diagnostics.notice("arrow re-registered as \(name, privacy: .public) at key \(key)")
+            // Let it land before anything measures it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                StatusBarController.diagnostics.notice("arrow healing result: validPosition=\(self.isBtnSeparateValidPosition) arrow=\(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public) separator=\(String(describing: self.frameOf(self.btnSeparate)), privacy: .public)")
+                completion()
+            }
         }
+    }
+
+    private func configureExpandCollapseButton() {
+        guard let button = btnExpandCollapse.button else { return }
+        button.image = isCollapsed ? Assets.expandImage : Assets.collapseImage
+        button.target = self
+        button.action = #selector(self.btnExpandCollapsePressed(sender:))
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
     // MARK: macOS 27 diagnostics
@@ -499,9 +550,12 @@ class StatusBarController {
         }
     }
 
-    // While collapsed, the filler next to the arrow must still sit right next to
-    // it (the separator may legitimately be in the overflow). Anything else means
-    // the system re-laid the bar under us; log it so the trigger can be found.
+    // While collapsed, the filler next to the arrow should still be close to it:
+    // adjacent, or separated only by a small system item such as the dynamic
+    // "Audio and Video Controls" (about 40pt with spacing). Anything else means
+    // the system re-laid the bar under us. This audit only logs; acting on it
+    // (clearing and re-setting the arrow image) was tried and it pushed the
+    // arrow into the overflow, so it must never touch the bar.
     private func auditCollapsedState() {
         guard isCollapsed, !fillerChain.isInFlight else { return }
         guard let farthest = fillerChain.items.last else {
@@ -509,13 +563,13 @@ class StatusBarController {
             return
         }
         guard let f = frameOf(farthest), let e = frameOf(btnExpandCollapse) else {
-            StatusBarController.diagnostics.error("audit: collapsed but frames unavailable: filler=\(String(describing: self.frameOf(farthest)), privacy: .public) arrow=\(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public)")
+            StatusBarController.diagnostics.notice("audit: collapsed; frames unavailable: filler=\(String(describing: self.frameOf(farthest)), privacy: .public) arrow=\(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public)")
             return
         }
-        if !isAdjacent(left: f, right: e) {
+        let gap = e.minX - f.maxX
+        if !(isAdjacent(left: f, right: e) || (gap > 0 && gap <= 72)) {
             let fs = farthest.button?.window?.screen.map { Int($0.frame.minX) } ?? -1, es = btnExpandCollapse.button?.window?.screen.map { Int($0.frame.minX) } ?? -1
-            StatusBarController.diagnostics.error("audit: collapsed but the filler next to the arrow is not adjacent: filler=\(Int(f.minX))-\(Int(f.maxX)) (screen \(fs)) arrow=\(Int(e.minX))-\(Int(e.maxX)) (screen \(es)); redrawing arrow")
-            redrawArrow()
+            StatusBarController.diagnostics.error("audit: collapsed but the filler next to the arrow is far from it: filler=\(Int(f.minX))-\(Int(f.maxX)) (screen \(fs)) arrow=\(Int(e.minX))-\(Int(e.maxX)) (screen \(es))")
         }
     }
 
