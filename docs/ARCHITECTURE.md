@@ -148,8 +148,11 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   re-registration a few units lower. Small system items ("Now Playing",
   "Audio and Video Controls") attach next to the separator, so the probe rule
   allows one such item between the separator and the probe as long as the
-  probe stays left of the arrow. Measured on 27.0 (26A428); see the comments
-  in both files.
+  probe stays left of the arrow. A Cmd-drag of any of the app's items makes
+  MenuBarAgent re-derive the keys of all of them from geometry, so a drag
+  while collapsed (fillers on the bar, some in the overflow with stale
+  geometry) scrambles the arrangement; rearranging is only safe while
+  expanded. Measured on 27.0 (26A428); see the comments in both files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
   so the collapse can still fire there.
