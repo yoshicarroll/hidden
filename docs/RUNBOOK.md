@@ -18,18 +18,46 @@ Both must exit 0 with **no** `MACOSX_DEPLOYMENT_TARGET` override; the floor is
 13.0 in the project file. The single expected warning is the deliberately
 deprecated `SMLoginItemSetEnabled(false)` call that cleans up legacy installs.
 
+### Testing on macOS 27: build sandboxed
+
+On macOS 27 the app must run **sandboxed** to behave like the shipping build.
+An unsandboxed debug build reads its defaults from a different domain than the
+system expects, and the position keys the app writes are ignored, so hiding
+silently fails. Ad-hoc signing with the entitlements is enough:
+
+```sh
+xcodebuild -project 'Hidden Bar.xcodeproj' -scheme 'Hidden Bar' -configuration Release \
+  -derivedDataPath /tmp/hb-build CODE_SIGN_IDENTITY="-" CODE_SIGN_STYLE=Manual \
+  DEVELOPMENT_TEAM="" PROVISIONING_PROFILE_SPECIFIER="" \
+  CODE_SIGN_ENTITLEMENTS=hidden/Hidden.entitlements build
+pkill -f "Hidden Bar.app"; rm -rf "/Applications/Hidden Bar.app"
+cp -R "/tmp/hb-build/Build/Products/Release/Hidden Bar.app" /Applications/
+open "/Applications/Hidden Bar.app"
+```
+
+The app auto-collapses about a second after launch; give it ten seconds
+before checking. Preferences of a sandboxed app cannot be written from a
+terminal (`defaults write` fails on the container); to test a preference, pass
+it in the argument domain instead, e.g.
+`"/Applications/Hidden Bar.app/Contents/MacOS/Hidden Bar" -alwaysHiddenSectionEnabled YES`.
+Note that the app's own setters may then persist it.
+
 ## Behavioral verification (no test target exists; this is the methodology)
 
 The repo has no unit-test infrastructure; behavior is verified against the real
 menu bar. Two building blocks make that scriptable:
 
-1. **Truth signal**: the separator's AX size.
-   `osascript -e 'tell application "System Events" to tell process "Hidden Bar" to get size of menu bar item 2 of menu bar 2'`
-   reads ~20pt expanded vs ~2x-screen-width collapsed. Item 1 is the arrow.
-2. **Real clicks, not AXPress**: `AXPress` on the arrow is a no-op because the
-   action handler reads `NSApp.currentEvent` (nil under assistive synthesis;
-   known accessibility defect). Post real `CGEvent` mouse clicks at the arrow's
-   AX-reported coordinates instead.
+1. **Truth signal**. macOS <= 26: the separator's AX size
+   (`osascript -e 'tell application "System Events" to tell process "Hidden Bar" to get size of menu bar item 2 of menu bar 2'`
+   reads ~20pt expanded vs ~2x-screen-width collapsed). macOS 27: the separator
+   never changes size; use `tools/macos27-hide-check.swift` (below), which reads
+   what MenuBarAgent actually hosts on each bar. Screenshots (`screencapture`)
+   are the other reliable signal; both need a permission for the terminal
+   (Accessibility, Screen Recording).
+2. **Clicks**: `AXPress` on the arrow toggles it (the handler treats a press
+   with no mouse event as a plain click since v1.11); the check tool's
+   `--press` uses it. Never switch the user's window focus or move the pointer
+   from a script on a machine someone is working on.
 
 Standard checks before any release:
 
@@ -135,3 +163,25 @@ swift tools/macos27-hide-check.swift --press --expect-hidden Magnet 1Password
 Names are the owning apps' names as printed in the dump. The `--press` option
 performs an accessibility press on Hidden Bar's arrow, waits for the layout to
 settle, then checks. Exit status is non-zero on any failed expectation.
+
+## Working on the macOS 27 code (read before touching it)
+
+- The mechanism lives in `hidden/Features/StatusBar/FillerChain.swift` and the
+  macOS 27 sections of `StatusBarController.swift`. Everything measured about
+  MenuBarAgent's layout is in ARCHITECTURE.md; trust it over intuition.
+- Add a case to `tests/FillerChainTests/main.swift` for any behaviour change to
+  the chain, and verify on the real bar with a **sandboxed** build and
+  `tools/macos27-hide-check.swift`; read the diagnostics log after each change.
+- Never act on the audit from code, and never clear the arrow's image to force
+  a redraw: that let MenuBarAgent re-key the arrow into the overflow.
+- Rearranging items is only safe while expanded; a drag makes MenuBarAgent
+  re-derive every Hidden Bar item's key from geometry.
+- An arrow placed by key only (fresh install, or after an automatic
+  re-registration) is not pinned until the user Cmd-drags it once.
+- From scripts, never switch the user's window focus or move the pointer on a
+  machine someone is working on; accessibility presses on the app's own arrow
+  are fine.
+- The branch is `fix/macos27-overflow-hiding` on the `yoshicarroll/hidden` fork
+  (`upstream` is `dwarvesf/hidden`); the upstream PR draft is kept outside the
+  repo; a test build is published as pre-release `v1.11-macos27-fix` on the fork
+  (`gh release upload v1.11-macos27-fix <zip> --repo yoshicarroll/hidden --clobber`).

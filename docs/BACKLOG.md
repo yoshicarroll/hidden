@@ -12,26 +12,47 @@ math, collapse state machine) are HIGH RISK and require a mandatory review-team 
 ## macOS 27 follow-ups
 
 The hide mechanism on macOS 27 is fixed (#360) with overflow-based fillers; see
-ARCHITECTURE.md "Known architectural limits" for the measured behavior.
+ARCHITECTURE.md "Known architectural limits" for the measured behavior and
+`docs/RUNBOOK.md` for how to build, verify and read the diagnostics. Branch
+`fix/macos27-overflow-hiding` on the `yoshicarroll/hidden` fork; the upstream PR
+is drafted (not opened) at `~/Desktop/hidden-bar-pr-360.md`; a test build is
+published as pre-release `v1.11-macos27-fix` on the fork.
 
-- **Collapse animation.** macOS animates items into its overflow, so collapsing is
-  no longer instant. Inherent to the mechanism; note it in the release.
-- **Blank stretch while collapsed.** Fillers that fit occupy the free space as an
-  empty run of menu bar left of the arrow. Cosmetic; the same space would be empty
-  with the icons simply gone.
-- **Key search cost.** The first collapse after launch, or after the separator is
-  dragged, probes up to ~12 layout passes to find the filler key; later collapses
-  reuse the cached key. Consider persisting the key across launches. Measured and
-  rejected: keeping permanent fillers and toggling `isVisible` (the approach in
-  #392). A hidden-then-shown item reappears at the far left on 27.0, both within a
-  session and across relaunch, so the fillers must be recreated each collapse.
-- **Always-hidden section on 27.** Exercised once via the argument domain
-  (`-alwaysHiddenSectionEnabled YES -areSeparatorsHidden YES`): its chain places
-  and the section, separator included, goes into the overflow while expanded.
-  Not yet tested with real icons dragged into that section.
-- **Stored-position drift.** MenuBarAgent restores the last dragged position of the
-  arrow and separator by name; users upgrading from a broken 27 build may find the
-  separator right of the arrow and must drag it once (documented in MANUAL.md).
+Open questions, in priority order:
+
+- **Arrow stability without a drag.** An arrow placed by key only (fresh install,
+  or after the automatic re-registration `hiddenbar_expandcollapse_N`) can be
+  re-keyed by MenuBarAgent when it re-inserts it without room on a full display,
+  ending up left of the separator or in the overflow; MenuBarAgent's log shows it
+  dropping and re-acquiring its process assertion on the app every few seconds.
+  A user Cmd-drag pins the position for good. The app heals the arrangement at
+  launch, on a skipped collapse and between placement retries, but each heal
+  produces another unpinned name. Ideas: prompt once for the drag; find what
+  triggers the re-insertion; make fillers less exposed to the same re-keying
+  (the audit has logged filler drift on some mornings).
+- **Glyph-only loss.** Seen once: the arrow kept its slot on one display but drew
+  nothing there, in both states; a relaunch restored it. Not reproduced since.
+  Do NOT fix by clearing and re-setting the button image: that let MenuBarAgent
+  re-key the arrow into the overflow (reverted in 6b0be33).
+- **Key search on a full active display.** Probes are placed by key, but when
+  the active display is full the search can bisect to a bracket a fraction of a
+  unit wide; today that is treated as a jammed arrow and the arrow is
+  re-registered lower. Cheaper detection, or fewer probes, would help.
+- **Overflow chevron placement.** Best effort: MenuBarAgent draws its chevron
+  only when the first non-fitting item starts on screen; the ladder keeps it off
+  wide displays in the measured cases, not in general.
+- **Collapse animation and blank stretch.** Inherent to the mechanism.
+- **Key search cost.** First collapse after launch or after the separator moves
+  probes up to 16 layout passes; later collapses reuse the cached key. Persisting
+  the key across launches is possible. Measured and rejected: permanent fillers
+  toggled with `isVisible` (#392's approach); a hidden-then-shown item reappears
+  at the far left on 27.0.
+- **Always-hidden section on 27.** Exercised once via the argument domain; its
+  chain places and the section, separator included, goes into the overflow while
+  expanded. Not yet tested with real icons dragged into that section. Note: that
+  test persisted `areSeparatorsHidden = true` on the development Mac; it has no
+  visible effect with the section disabled and an Option-click on the arrow
+  flips it back.
 
 ## Blocked on external-display hardware
 
