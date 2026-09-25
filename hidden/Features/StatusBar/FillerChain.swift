@@ -33,6 +33,12 @@ protocol FillerChainHost: AnyObject {
     /// Run `block` on the main queue after `seconds`.
     func after(_ seconds: TimeInterval, _ block: @escaping () -> Void)
     func log(_ message: String)
+    /// Extra per-item detail for search traces (raw frame, screen); may be empty.
+    func debugDescription(of item: Item) -> String
+}
+
+extension FillerChainHost {
+    func debugDescription(of item: Item) -> String { "" }
 }
 
 final class FillerChain<Host: FillerChainHost> {
@@ -46,7 +52,7 @@ final class FillerChain<Host: FillerChainHost> {
         var count: Int { lengths.count }
     }
 
-    static var maxAttempts: Int { 12 }
+    static var maxAttempts: Int { 16 }
     static var maxUnknownStreak: Int { 3 }
     static var pollInterval: TimeInterval { 0.05 }
     static var maxPolls: Int { 40 }
@@ -77,6 +83,11 @@ final class FillerChain<Host: FillerChainHost> {
     private var probe: Host.Item?
     private(set) var isInFlight = false
     private(set) var cachedKey: Double?
+    /// When a search gives up with both bounds set, the bracket (lo: a key that
+    /// landed right of the anchor, hi: one that landed left of it). A narrow
+    /// bracket with no success means another item's key sits within it, leaving
+    /// no room; the host can re-key that item and try again.
+    private(set) var lastFailedBracket: (lo: Double, hi: Double)?
     /// Bumped by remove(); every asynchronous step checks it, so a torn-down
     /// chain's pending work never touches the bar again.
     private var generation = 0
@@ -205,6 +216,7 @@ final class FillerChain<Host: FillerChainHost> {
 
     /// Bisect for a key whose probe lands immediately right of the anchor.
     private func findKey(startingAt initial: Double, generation: Int, completion: @escaping (Double?) -> Void) {
+        lastFailedBracket = nil
         var lo: Double? = nil
         var hi: Double? = nil
         var step = 40.0
@@ -219,6 +231,7 @@ final class FillerChain<Host: FillerChainHost> {
             waitForLayout(of: [probe], generation: generation) { [weak self] in
                 guard let self = self, let host = self.host else { return }
                 let result = self.placementOf(probe)
+                host.log("FillerChain \(self.prefix): attempt \(attempts) key \(guess) -> \(result): probe \(host.frame(of: probe).map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil") anchor \(self.anchor().flatMap { host.frame(of: $0) }.map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil")\(host.debugDescription(of: probe))")
                 host.removeItem(probe)
                 self.probe = nil
                 switch result {
@@ -237,6 +250,7 @@ final class FillerChain<Host: FillerChainHost> {
                 }
                 if attempts >= FillerChain.maxAttempts {
                     host.log("FillerChain \(self.prefix): key search gave up after \(attempts) attempts (lo=\(String(describing: lo)) hi=\(String(describing: hi)))")
+                    if let l = lo, let h = hi { self.lastFailedBracket = (l, h) }
                     completion(nil)
                     return
                 }

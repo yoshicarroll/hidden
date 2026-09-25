@@ -141,8 +141,15 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   remembers positions by autosave name and nothing can move an item, an arrow
   found left of the separator is re-registered under a fresh name
   (`hiddenbar_expandcollapse_N`, generation persisted) at a key the probe
-  search finds right of the separator. Measured on 27.0 (26A428); see the
-  comments in both files.
+  search finds right of the separator. MenuBarAgent also re-keys an item to
+  "just below its neighbour" when it re-inserts it without room, which can
+  leave no key space between the separator and the arrow for the fillers; a
+  search that gives up on a bracket narrower than two units triggers the same
+  re-registration a few units lower. Small system items ("Now Playing",
+  "Audio and Video Controls") attach next to the separator, so the probe rule
+  allows one such item between the separator and the probe as long as the
+  probe stays left of the arrow. Measured on 27.0 (26A428); see the comments
+  in both files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
   so the collapse can still fire there.

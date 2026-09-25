@@ -21,7 +21,7 @@ class StatusBarController {
     // display reconfiguration (wake, hot-plug) re-lays every bar for a second or
     // two, during which frames are unreliable; giving up on the first failure
     // left the bar expanded after wake.
-    private static let placementRetryDelays: [TimeInterval] = [2, 5, 10]
+    private static let placementRetryDelays: [TimeInterval] = [2, 5, 10, 20, 30]
     
     //MARK: - Variables
     private var timer:Timer? = nil
@@ -114,6 +114,7 @@ class StatusBarController {
         return generation == 0 ? expandCollapseAutosaveName : "\(expandCollapseAutosaveName)_\(generation)"
     }
     private var arrowHealAttempted = false
+    private var arrowSpacingAttempted = false
     private static let separateAutosaveName = "hiddenbar_separate"
     private static let alwaysHiddenAutosaveName = "hiddenbar_terminate"
     // Fresh install on 27: no saved keys yet. Large keys sort left of every other
@@ -473,6 +474,17 @@ class StatusBarController {
                 self.rollBackFailedCollapse()
                 return
             }
+            // A tight bracket means the arrow's key crowds the separator's (it was
+            // re-keyed to the boundary at some re-insertion); make room first.
+            if let bracket = self.fillerChain.lastFailedBracket, bracket.hi - bracket.lo < 2, !self.arrowSpacingAttempted {
+                self.arrowSpacingAttempted = true
+                self.spaceArrowKey(below: bracket.lo) { [weak self] in
+                    guard let self = self, self.isCollapsedByOverflow else { return }
+                    self.fillerChain.remove()
+                    self.placeFillersWithRetry(attempt: attempt, reason: reason)
+                }
+                return
+            }
             let delay = StatusBarController.placementRetryDelays[attempt]
             StatusBarController.diagnostics.notice("filler placement failed (\(reason, privacy: .public)); retry \(attempt + 1) in \(Int(delay))s")
             self.placementRetryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
@@ -517,6 +529,40 @@ class StatusBarController {
                 completion()
             }
         }
+    }
+
+    // Re-register the arrow a few key units below `lo` (a key known to sort right
+    // of the separator), so fillers have room between the separator and the
+    // arrow. Tries decreasing distances and keeps the first placement that lands
+    // the arrow right of the separator with at most one small item between.
+    private func spaceArrowKey(below lo: Double, completion: @escaping () -> Void) {
+        let candidates: [Double] = [lo - 4, lo - 1, lo - 0.25]
+        func attempt(_ index: Int) {
+            guard index < candidates.count else {
+                StatusBarController.diagnostics.error("arrow spacing: no candidate key landed the arrow next to the separator; giving up")
+                completion()
+                return
+            }
+            let key = candidates[index]
+            let generation = UserDefaults.standard.integer(forKey: StatusBarController.arrowNameGenerationKey) + 1
+            UserDefaults.standard.set(generation, forKey: StatusBarController.arrowNameGenerationKey)
+            let name = StatusBarController.currentArrowAutosaveName
+            NSStatusBar.system.removeStatusItem(self.btnExpandCollapse)
+            UserDefaults.standard.set(key, forKey: StatusBarController.positionKeyPrefix + name)
+            self.btnExpandCollapse = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            self.btnExpandCollapse.autosaveName = name
+            self.configureExpandCollapseButton()
+            self.fillerChain.invalidateCache()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                let ok: Bool = {
+                    guard let a = self.frameOf(self.btnExpandCollapse), let s = self.frameOf(self.btnSeparate) else { return false }
+                    return a.minX >= s.maxX - 1 && (a.minX - s.maxX) <= StatusBarController.smallSystemItemAllowance
+                }()
+                StatusBarController.diagnostics.notice("arrow spacing: re-registered as \(name, privacy: .public) at key \(key) -> \(ok ? "next to the separator" : "not next to the separator") arrow=\(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public) separator=\(String(describing: self.frameOf(self.btnSeparate)), privacy: .public)")
+                if ok { completion() } else { attempt(index + 1) }
+            }
+        }
+        attempt(0)
     }
 
     private func configureExpandCollapseButton() {
@@ -587,26 +633,28 @@ class StatusBarController {
         // notched display the system's overflow chevron can sit between the
         // fillers and the arrow. One of the two is always usable.
         fillerChain = makeFillerChain(prefix: "hiddenbar_fill", anchor: { [weak self] in self?.btnSeparate },
+                                      placement: { [weak self] probe, separator in self?.placementBetweenSeparatorAndArrow(probe: probe, separator: separator) ?? .unknown },
                                       validate: { [weak self] nearest, farthest in
                                           guard let self = self else { return false }
-                                          if let n = self.frameOf(nearest), let a = self.frameOf(self.btnSeparate), self.isAdjacent(left: a, right: n) { return true }
+                                          if let n = self.frameOf(nearest), let a = self.frameOf(self.btnSeparate), self.placementBetweenSeparatorAndArrow(probe: n, separator: a) == .between { return true }
                                           if let f = self.frameOf(farthest), let e = self.frameOf(self.btnExpandCollapse), self.isAdjacent(left: f, right: e) { return true }
                                           StatusBarController.diagnostics.notice("validate: separator \(String(describing: self.frameOf(self.btnSeparate)), privacy: .public) nearest \(String(describing: self.frameOf(nearest)), privacy: .public) farthest \(String(describing: self.frameOf(farthest)), privacy: .public) arrow \(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public)")
                                           return false
                                       })
         // The always-hidden chain's right-hand neighbour belongs to another app,
         // so it keeps the default check against its own separator.
-        alwaysHiddenFillerChain = makeFillerChain(prefix: "hiddenbar_ahfill", anchor: { [weak self] in self?.btnAlwaysHidden }, validate: nil)
+        alwaysHiddenFillerChain = makeFillerChain(prefix: "hiddenbar_ahfill", anchor: { [weak self] in self?.btnAlwaysHidden }, placement: nil, validate: nil)
     }
 
     private func makeFillerChain(prefix: String, anchor: @escaping () -> NSStatusItem?,
+                                 placement: ((CGRect, CGRect) -> FillerPlacement)?,
                                  validate: ((NSStatusItem, NSStatusItem) -> Bool)?) -> FillerChain<StatusBarController> {
         return FillerChain(host: self, prefix: prefix, anchor: anchor,
                            geometry: { [weak self] in self?.fillerGeometry() ?? .init(lengths: [100]) },
                            // Just below the anchor's geometric key is the natural
                            // first guess (larger keys sort further left).
                            initialGuess: { [weak self] anchorFrame in (self?.geometricPositionKey(ofFrame: anchorFrame) ?? 0) - 18 },
-                           placement: { [weak self] probe, anchor in self?.placement(ofProbe: probe, rightOf: anchor) ?? .unknown },
+                           placement: placement ?? { [weak self] probe, anchor in self?.placement(ofProbe: probe, rightOf: anchor) ?? .unknown },
                            validate: validate)
     }
 
@@ -698,6 +746,21 @@ class StatusBarController {
         if probe.maxX <= anchor.minX + 1 { return .tooFarLeft }
         if probe.minX >= anchor.maxX - 1 { return isAdjacent(left: anchor, right: probe) ? .between : .tooFarRight }
         return .unknown
+    }
+
+    // For the regular chain: MenuBarAgent attaches small system items ("Now
+    // Playing", "Audio and Video Controls", 16-20pt) right next to the
+    // separator, so a probe can never be strictly adjacent to it then. Accept a
+    // probe right of the separator with room for one such item in between, as
+    // long as it is still left of the arrow: anything keyed between the
+    // separator and the arrow hides exactly the icons left of the separator.
+    private static let smallSystemItemAllowance: CGFloat = 72
+    private func placementBetweenSeparatorAndArrow(probe: CGRect, separator: CGRect) -> FillerPlacement {
+        if probe.maxX <= separator.minX + 1 { return .tooFarLeft }
+        guard probe.minX >= separator.maxX - 1 else { return .unknown }
+        if let arrow = frameOf(btnExpandCollapse), probe.minX >= arrow.maxX - 1 { return .tooFarRight }
+        let gap = probe.minX - separator.maxX
+        return (isAdjacent(left: separator, right: probe) || gap <= StatusBarController.smallSystemItemAllowance) ? .between : .tooFarRight
     }
 
     // MARK: macOS 27 position keys
@@ -870,5 +933,13 @@ extension StatusBarController: FillerChainHost {
 
     func log(_ message: String) {
         StatusBarController.diagnostics.notice("\(message, privacy: .public)")
+    }
+
+    func debugDescription(of item: NSStatusItem) -> String {
+        guard let button = item.button, let window = button.window else { return " [no window]" }
+        let raw = window.convertToScreen(button.convert(button.bounds, to: nil))
+        let screen = window.screen.map { "\(Int($0.frame.minX))+\(Int($0.frame.width))" } ?? "nil"
+        let sepScreen = btnSeparate.button?.window?.screen.map { "\(Int($0.frame.minX))" } ?? "nil"
+        return " [raw \(Int(raw.minX))-\(Int(raw.maxX)) y=\(Int(raw.minY)) screen \(screen); separator screen \(sepScreen)]"
     }
 }
