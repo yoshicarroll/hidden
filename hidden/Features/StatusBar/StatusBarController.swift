@@ -490,6 +490,16 @@ class StatusBarController {
             self.placementRetryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
                 guard let self = self, self.isCollapsedByOverflow else { return }
                 self.fillerChain.remove()
+                // The arrangement can go bad between attempts (MenuBarAgent re-keys
+                // a legacy-keyed arrow when it re-inserts it without room).
+                if !self.isBtnSeparateValidPosition {
+                    self.arrowHealAttempted = false
+                    self.healArrowPosition { [weak self] in
+                        guard let self = self, self.isCollapsedByOverflow else { return }
+                        self.placeFillersWithRetry(attempt: attempt + 1, reason: reason)
+                    }
+                    return
+                }
                 self.placeFillersWithRetry(attempt: attempt + 1, reason: reason)
             }
         }
@@ -758,7 +768,9 @@ class StatusBarController {
     private func placementBetweenSeparatorAndArrow(probe: CGRect, separator: CGRect) -> FillerPlacement {
         if probe.maxX <= separator.minX + 1 { return .tooFarLeft }
         guard probe.minX >= separator.maxX - 1 else { return .unknown }
-        if let arrow = frameOf(btnExpandCollapse), probe.minX >= arrow.maxX - 1 { return .tooFarRight }
+        // Only meaningful while the arrow is right of the separator; a misplaced
+        // arrow is healed separately and must not veto correct probes.
+        if let arrow = frameOf(btnExpandCollapse), arrow.minX >= separator.maxX - 1, probe.minX >= arrow.maxX - 1 { return .tooFarRight }
         let gap = probe.minX - separator.maxX
         return (isAdjacent(left: separator, right: probe) || gap <= StatusBarController.smallSystemItemAllowance) ? .between : .tooFarRight
     }
