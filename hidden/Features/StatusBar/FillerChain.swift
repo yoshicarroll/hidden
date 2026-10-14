@@ -394,3 +394,44 @@ final class FillerChain<Host: FillerChainHost> {
         host?.after(FillerChain.pollInterval, poll)
     }
 }
+
+/// Judges the collapsed-state audit from the frames of the filler next to the
+/// arrow and of the arrow, as reported on one display. Pure, so the test suite
+/// covers it; StatusBarController runs it once a minute and only logs.
+///
+/// The gap between the two is not a constant: icons the user keeps between the
+/// separator and the arrow sit in it, and dynamic system items ("Audio and Video
+/// Controls") come and go there. So the first look at each display after a
+/// placement records the gap, and later looks report a change of more than
+/// `allowance`. On a display narrower than the filler, the filler is in the
+/// overflow by design and its frame is stale (it runs past the display edge);
+/// such a look is skipped.
+struct CollapsedAudit {
+    enum Verdict: Equatable {
+        case ok
+        case stale
+        case baseline
+        case arrowLeftOfFiller
+        case gapChanged(from: CGFloat, to: CGFloat)
+    }
+
+    /// One small system item with its spacing, or one ordinary icon appearing.
+    static var allowance: CGFloat { 72 }
+
+    /// Gap per display, keyed by the display's left edge.
+    private var baselines: [CGFloat: CGFloat] = [:]
+
+    /// Forget the recorded gaps; call on every new placement.
+    mutating func reset() { baselines = [:] }
+
+    mutating func judge(filler: CGRect, arrow: CGRect, screen: CGRect) -> Verdict {
+        guard filler.minX >= screen.minX - 1, filler.maxX <= screen.maxX + 1 else { return .stale }
+        guard arrow.minX >= filler.maxX - 1 else { return .arrowLeftOfFiller }
+        let gap = arrow.minX - filler.maxX
+        guard let baseline = baselines[screen.minX] else {
+            baselines[screen.minX] = gap
+            return .baseline
+        }
+        return abs(gap - baseline) <= CollapsedAudit.allowance ? .ok : .gapChanged(from: baseline, to: gap)
+    }
+}

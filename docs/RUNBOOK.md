@@ -134,8 +134,13 @@ The macOS 27 code logs every collapse and expand with its trigger (arrow,
 auto-collapse timer, hover, launch, separators toggled), each screen
 configuration change, sleep/wake and screen sleep/wake, MenuBarAgent
 relaunches, each filler placement (cached key or search, attempts, result),
-rollbacks of a failed collapse, and a once-a-minute audit that reports when the
-bar is collapsed but the fillers are no longer next to the separator. Notice
+rollbacks of a failed collapse, and a once-a-minute audit of the collapsed bar.
+The audit records the gap between the arrow and the filler next to it once per
+display after each placement ("audit: gap ... is Npt on screen X"; icons kept
+between the separator and the arrow sit in that gap) and reports when the
+arrow ends up left of that filler or the gap changes by more than 72pt. It
+skips a display where the filler is in the overflow (its frame runs past the
+display edge, normal on a display narrower than the filler). Notice
 level persists, so the trail survives a reboot. In zsh, `log` is a builtin
 (`log: too many arguments`, or silently nothing inside a pipeline); call
 `/usr/bin/log` from scripts:

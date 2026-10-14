@@ -433,7 +433,28 @@ func testInvalidateCacheAndInFlightRemoveDiscard() {
     expect(result == true, "usable afterwards")
 }
 
+func r(_ minX: CGFloat, _ maxX: CGFloat) -> CGRect { CGRect(x: minX, y: 0, width: maxX - minX, height: 24) }
+
+func testCollapsedAudit() {
+    print("audit: no false positives from overflowed fillers or icons between the separator and the arrow")
+    let builtIn = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+    let external = CGRect(x: 1728, y: 0, width: 2304, height: 1296)
+    var audit = CollapsedAudit()
+    // Frames from real false positives (macOS 27.0.1).
+    expect(audit.judge(filler: r(1184, 1984), arrow: r(1277, 1309), screen: builtIn) == .stale, "filler running past the display edge is in the overflow: skipped")
+    expect(audit.judge(filler: r(2578, 3378), arrow: r(3466, 3498), screen: external) == .baseline, "first look records the gap (an icon sits in it)")
+    expect(audit.judge(filler: r(2570, 3370), arrow: r(3458, 3490), screen: external) == .ok, "same gap a minute later")
+    expect(audit.judge(filler: r(274, 1074), arrow: r(1162, 1194), screen: builtIn) == .baseline, "each display has its own baseline")
+    expect(audit.judge(filler: r(274, 1074), arrow: r(1202, 1234), screen: builtIn) == .ok, "a 40pt system item appearing is within the allowance")
+    // Real trouble.
+    expect(audit.judge(filler: r(2000, 2800), arrow: r(3466, 3498), screen: external) == .gapChanged(from: 88, to: 666), "fillers re-laid far from the arrow are reported")
+    expect(audit.judge(filler: r(3000, 3800), arrow: r(3466, 3498), screen: external) == .arrowLeftOfFiller, "arrow left of the filler is reported")
+    audit.reset()
+    expect(audit.judge(filler: r(2000, 2800), arrow: r(3466, 3498), screen: external) == .baseline, "a new placement starts a new baseline")
+}
+
 testHappyPath()
+testCollapsedAudit()
 testParkedFillersAreReused()
 testParkedFillersFollowGeometry()
 testStaleParkedFillersAreReplaced()

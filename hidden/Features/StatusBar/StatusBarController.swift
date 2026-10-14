@@ -15,6 +15,7 @@ class StatusBarController {
     // (notice level persists; see docs/RUNBOOK.md).
     static let diagnostics = Logger(subsystem: "com.dwarvesv.minimalbar", category: "macOS27")
     private var stateAuditTimer: Timer?
+    private var collapsedAudit = CollapsedAudit()
     private var screenChangeTimer: Timer?
     private var placementRetryTimer: Timer?
     // Delays before retrying a collapse whose fillers could not be placed. A
@@ -467,6 +468,7 @@ class StatusBarController {
     // still meant to be collapsed, and only then roll back to expanded.
     private func placeFillersWithRetry(attempt: Int, reason: String) {
         placementRetryTimer?.invalidate()
+        collapsedAudit.reset()
         fillerChain.insert { [weak self] ok in
             guard let self = self, self.isCollapsedByOverflow else { return }
             if ok {
@@ -609,26 +611,33 @@ class StatusBarController {
         }
     }
 
-    // While collapsed, the filler next to the arrow should still be close to it:
-    // adjacent, or separated only by a small system item such as the dynamic
-    // "Audio and Video Controls" (about 40pt with spacing). Anything else means
-    // the system re-laid the bar under us. This audit only logs; acting on it
-    // (clearing and re-setting the arrow image) was tried and it pushed the
-    // arrow into the overflow, so it must never touch the bar.
+    // While collapsed, the filler next to the arrow should stay where the
+    // placement left it relative to the arrow; see CollapsedAudit for what
+    // counts as a change. Anything else means the system re-laid the bar under
+    // us. This audit only logs; acting on it (clearing and re-setting the arrow
+    // image) was tried and it pushed the arrow into the overflow, so it must
+    // never touch the bar.
     private func auditCollapsedState() {
         guard isCollapsed, !fillerChain.isInFlight else { return }
         guard let farthest = fillerChain.items.last else {
             StatusBarController.diagnostics.error("audit: collapsed but no fillers on the bar")
             return
         }
-        guard let f = frameOf(farthest), let e = frameOf(btnExpandCollapse) else {
-            StatusBarController.diagnostics.notice("audit: collapsed; frames unavailable: filler=\(String(describing: self.frameOf(farthest)), privacy: .public) arrow=\(String(describing: self.frameOf(self.btnExpandCollapse)), privacy: .public)")
-            return
-        }
-        let gap = e.minX - f.maxX
-        if !(isAdjacent(left: f, right: e) || (gap > 0 && gap <= 72)) {
-            let fs = farthest.button?.window?.screen.map { Int($0.frame.minX) } ?? -1, es = btnExpandCollapse.button?.window?.screen.map { Int($0.frame.minX) } ?? -1
-            StatusBarController.diagnostics.error("audit: collapsed but the filler next to the arrow is far from it: filler=\(Int(f.minX))-\(Int(f.maxX)) (screen \(fs)) arrow=\(Int(e.minX))-\(Int(e.maxX)) (screen \(es))")
+        // Both frames as reported on one display: the gap means nothing across
+        // displays of different widths, so skip a minute where the two item
+        // windows sit on different screens.
+        guard let fillerScreen = farthest.button?.window?.screen, let arrowScreen = btnExpandCollapse.button?.window?.screen,
+              fillerScreen == arrowScreen,
+              let f = frameOf(farthest, translated: false), let e = frameOf(btnExpandCollapse, translated: false) else { return }
+        switch collapsedAudit.judge(filler: f, arrow: e, screen: fillerScreen.frame) {
+        case .ok, .stale:
+            break
+        case .baseline:
+            StatusBarController.diagnostics.notice("audit: gap between the arrow and the filler next to it is \(Int(e.minX - f.maxX))pt on screen \(Int(fillerScreen.frame.minX))")
+        case .arrowLeftOfFiller:
+            StatusBarController.diagnostics.error("audit: collapsed but the arrow is left of the filler next to it: filler=\(Int(f.minX))-\(Int(f.maxX)) arrow=\(Int(e.minX))-\(Int(e.maxX)) (screen \(Int(fillerScreen.frame.minX)))")
+        case let .gapChanged(from, to):
+            StatusBarController.diagnostics.error("audit: collapsed but the gap between the arrow and the filler next to it changed from \(Int(from))pt to \(Int(to))pt: filler=\(Int(f.minX))-\(Int(f.maxX)) arrow=\(Int(e.minX))-\(Int(e.maxX)) (screen \(Int(fillerScreen.frame.minX)))")
         }
     }
 
@@ -722,7 +731,7 @@ class StatusBarController {
         return btnSeparate.button?.window?.screen ?? NSScreen.main
     }
 
-    private func frameOf(_ item: NSStatusItem?) -> CGRect? {
+    private func frameOf(_ item: NSStatusItem?, translated: Bool = true) -> CGRect? {
         guard let button = item?.button, let window = button.window else { return nil }
         var frame = window.convertToScreen(button.convert(button.bounds, to: nil))
         // A freshly created item reports a placeholder frame near the origin, with
@@ -732,7 +741,7 @@ class StatusBarController {
         let strip = CGRect(x: itemScreen.frame.minX, y: itemScreen.visibleFrame.maxY - 1,
                            width: itemScreen.frame.width, height: itemScreen.frame.maxY - itemScreen.visibleFrame.maxY + 2)
         guard strip.contains(CGPoint(x: frame.midX, y: frame.midY)) else { return nil }
-        if let reference = referenceScreen, itemScreen != reference {
+        if translated, let reference = referenceScreen, itemScreen != reference {
             frame.origin.x += reference.frame.maxX - itemScreen.frame.maxX
             frame.origin.y += reference.frame.maxY - itemScreen.frame.maxY
         }

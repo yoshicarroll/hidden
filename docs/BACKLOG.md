@@ -29,7 +29,8 @@ Open questions, in priority order:
   launch, on a skipped collapse and between placement retries, but each heal
   produces another unpinned name. Ideas: prompt once for the drag; find what
   triggers the re-insertion; make fillers less exposed to the same re-keying
-  (the audit has logged filler drift on some mornings).
+  (the audit logged filler drift on some mornings, but before 2026-10-14 its
+  reports were mostly false positives; re-check with the per-display baseline).
 - **Glyph-only loss.** Seen once: the arrow kept its slot on one display but drew
   nothing there, in both states; a relaunch restored it. Not reproduced since.
   Do NOT fix by clearing and re-setting the button image: that let MenuBarAgent
@@ -86,10 +87,6 @@ Open questions, in priority order:
   Still open: with no items created, ports still grew 422 → 759 and memory 32 → 72 MB in
   16h across three sleep/wake cycles with monitor reconnects. Measure growth per
   reconnect, and whether it scales with the number of live items.
-- **macOS 27 audit false positives.** The once-a-minute audit logs "filler next to the
-  arrow is far from it" about every minute: on a display narrower than the first filler
-  that filler is in the overflow (stale frame), and an icon kept between the separator
-  and the arrow exceeds its 72pt allowance. Harmless, but it buries real errors.
 - **Old branch decision.** `feature/menubarDetection` (PR #115) and `feature/ghost-mode`
   (PR #57) were kept per never-delete. Review or discard, Han's call.
 
