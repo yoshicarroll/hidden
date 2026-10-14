@@ -102,10 +102,16 @@ deleting a merged branch auto-closes dependents otherwise.
 
 The live clusters and their code areas are documented at the end of
 [ARCHITECTURE.md](ARCHITECTURE.md#known-architectural-limits): notch, macOS 27
-mechanism break, and pointer-vs-open-menu limits. Memory reports (#361 et al.)
-have so far not reproduced as leaks (constraint-leak fix landed; `leaks` clean
-over toggle stress); re-check with a 24h+ uptime `footprint` sample before
-chasing further.
+mechanism break, and pointer-vs-open-menu limits. Memory reports (#361 et al.):
+on macOS 27 the leak is Mach ports and owned (unmapped) memory from status
+item churn, which `leaks` does not see (see ARCHITECTURE.md, macOS 27). Check a
+long-running instance with:
+
+```sh
+top -l 1 -o ports -stats pid,command,ports,mem -n 10     # Hidden Bar should be a few hundred ports
+lsmp -p "$(pgrep -x 'Hidden Bar')" | grep -c '^0x'        # same count, per right type in the third column
+footprint "$(pgrep -x 'Hidden Bar')" | head -20           # "Owned physical footprint (unmapped)" is the leaked part
+```
 
 ## Unit tests for the macOS 27 filler chain
 
@@ -117,7 +123,9 @@ Compiles `FillerChain.swift` with `tests/FillerChainTests/main.swift` (plain
 `swiftc`, no test target) and runs the chain against a simulated menu bar:
 happy path, cached-key fast path and recovery, independent cancellation of the
 two chains, cleanup after a failed placement, idempotent inserts, slow and
-never-attaching frames, and cancellation mid-search. Any behaviour change to
+never-attaching frames, cancellation mid-search, and parking (reuse across
+collapses, a changed filler count, stale or split-up parked fillers, discard on
+cache invalidation and on a remove mid-placement). Any behaviour change to
 the chain should come with a case here.
 
 ## Diagnosing a bar that expanded by itself on macOS 27
@@ -128,7 +136,9 @@ configuration change, sleep/wake and screen sleep/wake, MenuBarAgent
 relaunches, each filler placement (cached key or search, attempts, result),
 rollbacks of a failed collapse, and a once-a-minute audit that reports when the
 bar is collapsed but the fillers are no longer next to the separator. Notice
-level persists, so the trail survives a reboot:
+level persists, so the trail survives a reboot. In zsh, `log` is a builtin
+(`log: too many arguments`, or silently nothing inside a pipeline); call
+`/usr/bin/log` from scripts:
 
 ```sh
 log show --last 6h --predicate 'subsystem == "com.dwarvesv.minimalbar"' --style compact

@@ -152,7 +152,24 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   MenuBarAgent re-derive the keys of all of them from geometry, so a drag
   while collapsed (fillers on the bar, some in the overflow with stale
   geometry) scrambles the arrangement; rearranging is only safe while
-  expanded. Measured on 27.0 (26A428); see the comments in both files.
+  expanded. Status items are not recreated per collapse: on 27 every
+  `NSStatusItem` that is created and removed leaks about 21 Mach ports in the
+  app for good (with or without an autosave name; toggling `isVisible` leaks
+  about 18, changing `length` nothing; measured on 27.0.1), and the original
+  create-on-collapse fillers had reached ~10k ports and ~580 MB after two weeks.
+  `remove()` therefore parks placed fillers at length 0 and the next `insert()`
+  at the cached key reuses them (8pt, validate, grow, as for new ones); a
+  changed filler count reuses what it can. A zero-length item still takes one
+  item spacing (16pt), so while expanded the parked fillers leave a blank gap
+  right of the separator. A drag while expanded re-keys them from geometry and
+  can wedge another item between them, so reused fillers must also still be
+  neighbours, or they are replaced at the same key; an item dropped between
+  the separator and the gap is not detected and ends up hidden (accepted: the
+  validation allows up to 72pt there for system items). `discard()` really
+  removes the fillers: when the anchor is replaced or removed, when the cache
+  is invalidated, and when the separators are shown again. Probes are still
+  created per search. Measured on 27.0 (26A428); see the comments in both
+  files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
   so the collapse can still fire there.

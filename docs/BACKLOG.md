@@ -80,8 +80,16 @@ Open questions, in priority order:
   `Common/Util.swift:29-31`.
 - **Round-2 issue close sweep (~35 issues).** Obsolete-OS + meta/support candidates,
   deferred until v1.11 ships so the closures carry the strongest answer.
-- **24h memory dogfood (#361).** Instruments stress-cycling found no leak; run v1.11 as
-  the daily driver for 24h on the Air to close the open report.
+- **24h memory dogfood (#361).** Root cause on macOS 27 found and fixed: every status
+  item created and removed leaks ~21 Mach ports (OS bug), and the fillers were recreated
+  on every collapse (~10k ports, ~580 MB after 14 days); they are now parked and reused.
+  Still open: with no items created, ports still grew 422 → 759 and memory 32 → 72 MB in
+  16h across three sleep/wake cycles with monitor reconnects. Measure growth per
+  reconnect, and whether it scales with the number of live items.
+- **macOS 27 audit false positives.** The once-a-minute audit logs "filler next to the
+  arrow is far from it" about every minute: on a display narrower than the first filler
+  that filler is in the overflow (stale frame), and an icon kept between the separator
+  and the arrow exceeds its 72pt allowance. Harmless, but it buries real errors.
 - **Old branch decision.** `feature/menubarDetection` (PR #115) and `feature/ghost-mode`
   (PR #57) were kept per never-delete. Review or discard, Han's call.
 
