@@ -348,7 +348,7 @@ class StatusBarController {
         Preferences.areSeparatorsHidden = false
         
         if usesOverflowHiding {
-            alwaysHiddenFillerChain.remove()
+            alwaysHiddenFillerChain.discard()
             return
         }
         if !self.isCollapsed {
@@ -421,6 +421,9 @@ class StatusBarController {
         if usesOverflowHiding { StatusBarController.diagnostics.notice("expand (\(reason, privacy: .public))") }
         if usesOverflowHiding {
             placementRetryTimer?.invalidate()
+            // Parks the fillers at zero length rather than removing them (see
+            // FillerChain.parked): each leaves a ~16pt blank between the arrow
+            // and the separator while expanded.
             fillerChain.remove()
             isCollapsedByOverflow = false
             if alwaysHiddenFillersWanted { alwaysHiddenFillerChain.insert() }
@@ -875,7 +878,7 @@ extension StatusBarController {
         updateCollapsedLengths()
 
         if Preferences.alwaysHiddenSectionEnabled {
-            if usesOverflowHiding { alwaysHiddenFillerChain.remove() }
+            if usesOverflowHiding { alwaysHiddenFillerChain.discard() }
             if let existing = self.btnAlwaysHidden {
                 NSStatusBar.system.removeStatusItem(existing)
             }
@@ -895,7 +898,7 @@ extension StatusBarController {
                 }
             }
         } else {
-            if usesOverflowHiding { alwaysHiddenFillerChain.remove() }
+            if usesOverflowHiding { alwaysHiddenFillerChain.discard() }
             if let existing = self.btnAlwaysHidden {
                 NSStatusBar.system.removeStatusItem(existing)
             }

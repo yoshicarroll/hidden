@@ -7,7 +7,7 @@
 //  anchor and everything left of it into the system overflow. This type owns
 //  one such chain: finding the ordering key that lands the fillers immediately
 //  right of the anchor, placing them small, validating, growing them, and
-//  tearing them down. It talks to the menu bar only through FillerChainHost so
+//  parking them at zero length between collapses. It talks to the menu bar only through FillerChainHost so
 //  the whole state machine runs against a simulated bar in tests.
 //
 
@@ -64,6 +64,10 @@ final class FillerChain<Host: FillerChainHost> {
     /// boundary instead of taking its key. Resizing an existing item keeps it.
     static var insertionLength: CGFloat { 8 }
     static var probeLength: CGFloat { 8 }
+    /// Largest gap between neighbouring fillers that still counts as adjacent:
+    /// one item spacing (16pt on 27) with slack. Any item wedged in between adds
+    /// its own width plus another spacing.
+    static var maxNeighbourGap: CGFloat { 24 }
 
     private weak var host: Host?
     let prefix: String
@@ -78,6 +82,13 @@ final class FillerChain<Host: FillerChainHost> {
     private let initialGuess: (_ anchorFrame: CGRect) -> Double
 
     private(set) var items: [Host.Item] = []
+    /// Fillers taken off duty by remove(): still on the bar at zero length and
+    /// still keyed at cachedKey, reused by the next insert(). On macOS 27 every
+    /// status item that is created and removed leaks about 21 Mach ports in the
+    /// app (measured on 27.0.1; changing an item's length leaks nothing), so a
+    /// chain that collapses many times a day must not recreate its fillers. A
+    /// zero-length item still takes one item spacing (about 16pt) on the bar.
+    private(set) var parked: [Host.Item] = []
     /// The probe currently on the bar during a key search, so remove() can
     /// take it down even though it is not one of the fillers.
     private var probe: Host.Item?
@@ -116,8 +127,9 @@ final class FillerChain<Host: FillerChainHost> {
 
     /// Place the fillers. Idempotent: a call while a placement is in flight or
     /// already complete does nothing. `completion` reports whether the fillers
-    /// ended up right of the anchor; on failure nothing of the chain remains on
-    /// the bar. A remove() during the work cancels it without calling back.
+    /// ended up right of the anchor; on failure no filler remains on the bar
+    /// (parked ones only if the anchor never attached, so they were never
+    /// tried). A remove() during the work cancels it without calling back.
     func insert(completion: ((Bool) -> Void)? = nil) {
         guard !isInFlight else { return }
         guard items.isEmpty else { completion?(true); return }
@@ -154,15 +166,36 @@ final class FillerChain<Host: FillerChainHost> {
         }
     }
 
-    /// Remove every filler and cancel any work in progress.
+    /// Take the fillers off duty and cancel any work in progress. Placed fillers
+    /// are parked at zero length for the next insert(); anything still in flight
+    /// has not been validated and is removed.
     func remove() {
+        generation += 1
+        let wasInFlight = isInFlight
+        isInFlight = false
+        if wasInFlight { discardItems(); return }
+        guard !items.isEmpty else { return }
+        if let host = host { items.forEach { host.setLength(0, of: $0) } }
+        parked = items
+        items = []
+    }
+
+    /// Remove every filler from the bar, parked ones included, and cancel any
+    /// work in progress. For when the anchor goes away or the fillers' blank
+    /// spacing must not stay on the bar.
+    func discard() {
         generation += 1
         isInFlight = false
         discardItems()
     }
 
-    /// Forget the cached key, e.g. after the anchor was moved.
-    func invalidateCache() { cachedKey = nil }
+    /// Forget the cached key, e.g. after the anchor was moved. Parked fillers sit
+    /// at that key, so they go too.
+    func invalidateCache() {
+        cachedKey = nil
+        if let host = host { parked.forEach { host.removeItem($0) } }
+        parked = []
+    }
 
     /// Run only the key search: find a key whose item lands immediately right of
     /// the anchor, without placing any fillers. Used to re-register another item
@@ -186,9 +219,10 @@ final class FillerChain<Host: FillerChainHost> {
     // MARK: - Steps
 
     private func discardItems() {
-        guard let host = host else { items = []; probe = nil; return }
-        items.forEach { host.removeItem($0) }
+        guard let host = host else { items = []; parked = []; probe = nil; return }
+        (items + parked).forEach { host.removeItem($0) }
         items = []
+        parked = []
         if let p = probe { host.removeItem(p); probe = nil }
     }
 
@@ -268,15 +302,34 @@ final class FillerChain<Host: FillerChainHost> {
         attempt()
     }
 
-    /// Create the fillers small at `key`, confirm the one nearest the anchor sits
-    /// right next to it, then grow them all.
+    /// Put the fillers on the bar small at `key` (reusing parked ones, which sit
+    /// at that key already), confirm the one nearest the anchor sits right next
+    /// to it, then grow them all.
     private func place(at key: Double, geometry: Geometry, generation: Int, completion: @escaping (Bool) -> Void) {
         guard let host = host else { return }
-        items = (0..<geometry.count).map { i in
+        let reused = parked.prefix(geometry.count)
+        parked.dropFirst(geometry.count).forEach { host.removeItem($0) }
+        parked = []
+        reused.forEach { host.setLength(FillerChain.insertionLength, of: $0) }
+        items = Array(reused) + (reused.count..<geometry.count).map { i in
             host.makeItem(prefix: prefix, key: key - FillerChain.keyStep * Double(i), length: FillerChain.insertionLength)
         }
         waitForLayout(of: items, generation: generation) { [weak self] in
             guard let self = self, let host = self.host, let nearest = self.items.first, let farthest = self.items.last else { return }
+            // A drag while expanded re-keys parked fillers from their geometry and
+            // can leave another app's item between them, which growing would hide.
+            // The checks below only look at the ends of the chain, so parked
+            // fillers must also still be neighbours; if not, replace them at the
+            // same key.
+            if !reused.isEmpty, let gap = self.firstGapBetweenFillers() {
+                host.log("FillerChain \(self.prefix): parked fillers no longer adjacent (gap \(Int(gap))pt); replacing them")
+                self.items.forEach { host.removeItem($0) }
+                self.items = []
+                self.waitForLayout(of: [], generation: generation) { [weak self] in
+                    self?.place(at: key, geometry: geometry, generation: generation, completion: completion)
+                }
+                return
+            }
             guard self.validate(nearest, farthest) else {
                 let frames = self.items.map { host.frame(of: $0).map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil" }
                 let anchorFrame = self.anchor().flatMap { host.frame(of: $0) }.map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil"
@@ -289,6 +342,18 @@ final class FillerChain<Host: FillerChainHost> {
             for (item, length) in zip(self.items.reversed(), geometry.lengths) { host.setLength(length, of: item) }
             completion(true)
         }
+    }
+
+    /// The first gap between neighbouring fillers wider than maxNeighbourGap, or
+    /// nil if they all sit together. items[0] is leftmost (highest key).
+    private func firstGapBetweenFillers() -> CGFloat? {
+        guard let host = host else { return nil }
+        for (left, right) in zip(items, items.dropFirst()) {
+            guard let l = host.frame(of: left), let r = host.frame(of: right) else { continue }
+            let gap = r.minX - l.maxX
+            if gap < -1 || gap > FillerChain.maxNeighbourGap { return gap }
+        }
+        return nil
     }
 
     private func placementOf(_ item: Host.Item) -> FillerPlacement {

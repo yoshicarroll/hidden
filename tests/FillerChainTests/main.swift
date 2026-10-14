@@ -34,6 +34,7 @@ final class FakeHost: FillerChainHost {
     var liveProbes = 0
     var maxLiveProbes = 0
     var probesCreated = 0
+    var fillersCreated = 0
 
     private var queue: [(time: Double, block: () -> Void)] = []
     private var now = 0.0
@@ -68,7 +69,7 @@ final class FakeHost: FillerChainHost {
     func fits(_ item: FakeItem) -> Bool { fittingKeys().contains(item.key) }
     func makeItem(prefix: String, key: Double, length: CGFloat) -> FakeItem {
         let isProbe = prefix.hasSuffix("probe")
-        if isProbe { probesCreated += 1; liveProbes += 1; maxLiveProbes = max(maxLiveProbes, liveProbes) }
+        if isProbe { probesCreated += 1; liveProbes += 1; maxLiveProbes = max(maxLiveProbes, liveProbes) } else { fillersCreated += 1 }
         var effectiveKey = (!isProbe && misplaceFillers) ? 100_000 + Double(items.count) : key
         let item = add("\(prefix)#\(items.count)", key: effectiveKey, length: length)
         if regionWidth != nil, !fittingKeys().contains(effectiveKey) {
@@ -183,7 +184,10 @@ func testHappyPath() {
     let nearest = host.layoutFrame(of: chain.items[0])
     expect(nearest.minX - sepFrame.maxX <= FakeHost.spacing + 1, "nearest filler adjacent to the separator")
     chain.remove()
-    expect(chain.items.isEmpty && !host.items.contains { $0.name.hasPrefix("fill") }, "remove clears the bar")
+    expect(chain.items.isEmpty && chain.parked.count == 3, "remove parks the fillers")
+    expect(host.items.filter { $0.name.hasPrefix("fill") }.allSatisfy { $0.length == 0 }, "parked fillers are zero length")
+    chain.discard()
+    expect(chain.parked.isEmpty && !host.items.contains { $0.name.hasPrefix("fill") }, "discard clears the bar")
 }
 
 func testCachedKeyFastPathAndRecovery() {
@@ -335,7 +339,106 @@ func testLadderLengthsAppliedInOrder() {
     expect(byDistance.map(\.length) == [300, 500, 700], "rightmost filler gets lengths[0] (got \(byDistance.map(\.length)))")
 }
 
+func fillersOnBar(_ host: FakeHost, prefix: String = "fill") -> [FakeItem] {
+    host.items.filter { $0.name.hasPrefix(prefix) && !$0.name.contains("probe") }
+}
+
+func testParkedFillersAreReused() {
+    print("parking: remove() keeps the fillers at zero length and insert() reuses them")
+    let host = FakeHost(); let bar = makeBar(host); let chain = makeChain(host, anchor: bar.separator)
+    chain.insert(); host.run()
+    let first = chain.items
+    let created = host.fillersCreated, probes = host.probesCreated
+    for _ in 0..<5 {
+        chain.remove(); host.run()
+        expect(fillersOnBar(host).count == 3 && fillersOnBar(host).allSatisfy { $0.length == 0 }, "parked at zero length")
+        var result: Bool? = nil
+        chain.insert { result = $0 }; host.run()
+        expect(result == true && chain.isPlaced, "reinsert succeeds")
+    }
+    expect(host.fillersCreated == created, "no filler created after the first collapse (created \(host.fillersCreated - created))")
+    expect(host.probesCreated == probes, "no probe either")
+    expect(zip(chain.items, first).allSatisfy { $0 === $1 }, "the same items, in the same order")
+    expect(chain.items.allSatisfy { $0.length == 300 }, "grown to full length")
+    expect(fillersAreRightOfSeparator(host, chain, bar.separator), "still right of the separator")
+    // remove() on an idle chain with parked fillers leaves them alone.
+    chain.remove(); chain.remove()
+    expect(chain.parked.count == 3 && fillersOnBar(host).count == 3, "repeat remove keeps the parked set")
+}
+
+func testParkedFillersFollowGeometry() {
+    print("parking: a new filler count reuses what it can")
+    let host = FakeHost(); let bar = makeBar(host)
+    var lengths: [CGFloat] = [300, 300, 300]
+    let chain = FillerChain<FakeHost>(host: host, prefix: "fill", anchor: { bar.separator },
+                geometry: { .init(lengths: lengths) },
+                initialGuess: { f in Double(FakeHost.rightEdge - f.maxX) - 18 }, placement: adjacencyRule)
+    chain.insert(); host.run(); chain.remove()
+    let created = host.fillersCreated
+    lengths = [200, 300, 400, 400]
+    chain.insert(); host.run()
+    expect(chain.items.count == 4 && host.fillersCreated == created + 1, "one more filler created for a fourth display slot")
+    expect(fillersAreRightOfSeparator(host, chain, bar.separator), "all four right of the separator")
+    chain.remove()
+    lengths = [500, 500]
+    chain.insert(); host.run()
+    expect(chain.items.count == 2 && fillersOnBar(host).count == 2, "surplus parked fillers removed (on bar: \(fillersOnBar(host).count))")
+    expect(host.fillersCreated == created + 1, "none created for a shorter ladder")
+}
+
+func testStaleParkedFillersAreReplaced() {
+    print("parking: parked fillers that no longer land right of the anchor are replaced, not stacked")
+    let host = FakeHost(); let bar = makeBar(host); let chain = makeChain(host, anchor: bar.separator)
+    chain.insert(); host.run(); chain.remove()
+    bar.separator.key = 200   // dragged while expanded
+    var result: Bool? = nil
+    chain.insert { result = $0 }; host.run()
+    expect(result == true && fillersAreRightOfSeparator(host, chain, bar.separator), "re-placed right of the moved separator")
+    expect(fillersOnBar(host).count == 3, "only the new set is on the bar (\(fillersOnBar(host).count))")
+}
+
+func testItemWedgedBetweenParkedFillers() {
+    print("parking: an item dragged in between parked fillers is not hidden; the fillers are replaced at the same key")
+    let host = FakeHost(); let bar = makeBar(host); let chain = makeChain(host, anchor: bar.separator)
+    chain.insert(); host.run(); chain.remove()
+    guard let key = chain.cachedKey else { expect(false, "first placement cached a key"); return }
+    // A drag while expanded: MenuBarAgent re-keys the parked fillers from their
+    // geometry (16pt apart) and another app's item lands between two of them.
+    for (i, f) in chain.parked.enumerated() { f.key = key - 20 * Double(i) }
+    let wedged = host.add("macwhisper", key: key - 10, length: 32)
+    let created = host.fillersCreated, probes = host.probesCreated
+    var result: Bool? = nil
+    chain.insert { result = $0 }; host.run()
+    expect(result == true && chain.isPlaced, "collapse still succeeds")
+    expect(host.probesCreated == probes, "no key search: the cached key is still good")
+    expect(host.fillersCreated == created + 3, "a fresh set of three fillers")
+    expect(fillersOnBar(host).count == 3, "the old set is gone (on bar: \(fillersOnBar(host).count))")
+    let keys = chain.items.map(\.key)
+    expect(!keys.isEmpty && !(keys.min()! < wedged.key && wedged.key < keys.max()!), "the wedged item is outside the chain (keys \(keys), item \(wedged.key))")
+}
+
+func testInvalidateCacheAndInFlightRemoveDiscard() {
+    print("parking: invalidateCache() and a remove() mid-placement leave nothing behind")
+    let host = FakeHost(); let bar = makeBar(host); let chain = makeChain(host, anchor: bar.separator)
+    chain.insert(); host.run(); chain.remove()
+    chain.invalidateCache()
+    expect(chain.parked.isEmpty && fillersOnBar(host).isEmpty, "invalidateCache removes the parked fillers")
+    chain.insert(); host.run(); chain.remove()
+    chain.insert(); host.step(1)
+    expect(chain.isInFlight, "reinsert in flight")
+    chain.remove(); host.run()
+    expect(chain.parked.isEmpty && fillersOnBar(host).isEmpty, "unvalidated fillers are not parked")
+    var result: Bool? = nil
+    chain.insert { result = $0 }; host.run()
+    expect(result == true, "usable afterwards")
+}
+
 testHappyPath()
+testParkedFillersAreReused()
+testParkedFillersFollowGeometry()
+testStaleParkedFillersAreReplaced()
+testItemWedgedBetweenParkedFillers()
+testInvalidateCacheAndInFlightRemoveDiscard()
 testLadderLengthsAppliedInOrder()
 testCachedKeyFastPathAndRecovery()
 testFinding1_independentGenerations()
