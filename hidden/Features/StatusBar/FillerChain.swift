@@ -68,6 +68,11 @@ final class FillerChain<Host: FillerChainHost> {
     /// one item spacing (16pt on 27) with slack. Any item wedged in between adds
     /// its own width plus another spacing.
     static var maxNeighbourGap: CGFloat { 24 }
+    /// How long to let the bar settle before checking split-up parked fillers
+    /// again. During a display reconnect MenuBarAgent re-lays every bar and
+    /// frames read in between can look split (seen: a 904pt gap); replacing
+    /// fillers on such a frame costs a create and a remove each.
+    static var contiguityRecheckDelay: TimeInterval { 1.0 }
 
     private weak var host: Host?
     let prefix: String
@@ -315,33 +320,52 @@ final class FillerChain<Host: FillerChainHost> {
             host.makeItem(prefix: prefix, key: key - FillerChain.keyStep * Double(i), length: FillerChain.insertionLength)
         }
         waitForLayout(of: items, generation: generation) { [weak self] in
-            guard let self = self, let host = self.host, let nearest = self.items.first, let farthest = self.items.last else { return }
+            guard let self = self, let host = self.host, !self.items.isEmpty else { return }
             // A drag while expanded re-keys parked fillers from their geometry and
             // can leave another app's item between them, which growing would hide.
             // The checks below only look at the ends of the chain, so parked
-            // fillers must also still be neighbours; if not, replace them at the
-            // same key.
-            if !reused.isEmpty, let gap = self.firstGapBetweenFillers() {
-                host.log("FillerChain \(self.prefix): parked fillers no longer adjacent (gap \(Int(gap))pt); replacing them")
-                self.items.forEach { host.removeItem($0) }
-                self.items = []
-                self.waitForLayout(of: [], generation: generation) { [weak self] in
-                    self?.place(at: key, geometry: geometry, generation: generation, completion: completion)
+            // fillers must also still be neighbours. A split seen once may be a
+            // frame read mid-relayout, so check again after the bar settles and
+            // only then replace them at the same key.
+            guard !reused.isEmpty, let gap = self.firstGapBetweenFillers() else {
+                self.validateAndGrow(geometry: geometry, completion: completion)
+                return
+            }
+            host.log("FillerChain \(self.prefix): parked fillers look split (gap \(Int(gap))pt); checking again once the bar settles")
+            host.after(FillerChain.contiguityRecheckDelay) { [weak self] in
+                guard let self = self, generation == self.generation else { return }
+                self.waitForLayout(of: self.items, generation: generation) { [weak self] in
+                    guard let self = self, let host = self.host else { return }
+                    guard let gap = self.firstGapBetweenFillers() else {
+                        host.log("FillerChain \(self.prefix): parked fillers adjacent after settling")
+                        self.validateAndGrow(geometry: geometry, completion: completion)
+                        return
+                    }
+                    host.log("FillerChain \(self.prefix): parked fillers no longer adjacent (gap \(Int(gap))pt); replacing them")
+                    self.items.forEach { host.removeItem($0) }
+                    self.items = []
+                    self.waitForLayout(of: [], generation: generation) { [weak self] in
+                        self?.place(at: key, geometry: geometry, generation: generation, completion: completion)
+                    }
                 }
-                return
             }
-            guard self.validate(nearest, farthest) else {
-                let frames = self.items.map { host.frame(of: $0).map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil" }
-                let anchorFrame = self.anchor().flatMap { host.frame(of: $0) }.map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil"
-                host.log("FillerChain \(self.prefix): validation failed; fillers (nearest anchor first) \(frames) anchor \(anchorFrame)")
-                completion(false)
-                return
-            }
-            // items[0] has the highest key and sits next to the anchor; the flow
-            // reaches items.last first.
-            for (item, length) in zip(self.items.reversed(), geometry.lengths) { host.setLength(length, of: item) }
-            completion(true)
         }
+    }
+
+    /// Check the small fillers landed right of the anchor, then grow them.
+    private func validateAndGrow(geometry: Geometry, completion: @escaping (Bool) -> Void) {
+        guard let host = host, let nearest = items.first, let farthest = items.last else { return }
+        guard validate(nearest, farthest) else {
+            let frames = items.map { host.frame(of: $0).map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil" }
+            let anchorFrame = anchor().flatMap { host.frame(of: $0) }.map { "\(Int($0.minX))-\(Int($0.maxX))" } ?? "nil"
+            host.log("FillerChain \(prefix): validation failed; fillers (nearest anchor first) \(frames) anchor \(anchorFrame)")
+            completion(false)
+            return
+        }
+        // items[0] has the highest key and sits next to the anchor; the flow
+        // reaches items.last first.
+        for (item, length) in zip(items.reversed(), geometry.lengths) { host.setLength(length, of: item) }
+        completion(true)
     }
 
     /// The first gap between neighbouring fillers wider than maxNeighbourGap, or

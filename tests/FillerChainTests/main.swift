@@ -35,6 +35,10 @@ final class FakeHost: FillerChainHost {
     var maxLiveProbes = 0
     var probesCreated = 0
     var fillersCreated = 0
+    /// Until simulated time `until`, frame(of: item) reads `dx` off its layout
+    /// (a frame read while MenuBarAgent re-lays the bar during a reconnect).
+    var transientShift: (item: FakeItem, dx: CGFloat, until: Double)? = nil
+    var currentTime: Double { now }
 
     private var queue: [(time: Double, block: () -> Void)] = []
     private var now = 0.0
@@ -91,6 +95,7 @@ final class FakeHost: FillerChainHost {
         item.frameQueries += 1
         if item.frameQueries <= attachDelay { return nil }
         if regionWidth != nil, !fittingKeys().contains(item.key) { return CGRect(x: FakeHost.rightEdge - item.length, y: 0, width: item.length, height: 24) }
+        if let t = transientShift, t.item === item, now < t.until { return layoutFrame(of: item).offsetBy(dx: t.dx, dy: 0) }
         return layoutFrame(of: item)
     }
     func after(_ seconds: TimeInterval, _ block: @escaping () -> Void) { queue.append((now + seconds, block)) }
@@ -417,6 +422,23 @@ func testItemWedgedBetweenParkedFillers() {
     expect(!keys.isEmpty && !(keys.min()! < wedged.key && wedged.key < keys.max()!), "the wedged item is outside the chain (keys \(keys), item \(wedged.key))")
 }
 
+func testTransientSplitDuringRelayoutKeepsParkedFillers() {
+    print("parking: a split seen only while the bar re-lays (display reconnect) does not replace the fillers")
+    let host = FakeHost(); let bar = makeBar(host); let chain = makeChain(host, anchor: bar.separator)
+    chain.insert(); host.run(); chain.remove()
+    let parked = chain.parked
+    // The filler farthest from the anchor reads 900pt off for half a second.
+    host.transientShift = (parked[2], 900, host.currentTime + 0.5)
+    let created = host.fillersCreated
+    var result: Bool? = nil
+    chain.insert { result = $0 }; host.run()
+    expect(host.logs.contains { $0.contains("look split") }, "the split was seen")
+    expect(result == true && chain.isPlaced, "collapse succeeds")
+    expect(host.fillersCreated == created, "no filler created (created \(host.fillersCreated - created))")
+    expect(zip(chain.items, parked).allSatisfy { $0 === $1 }, "the parked fillers were reused")
+    expect(chain.items.allSatisfy { $0.length == 300 }, "and grown")
+}
+
 func testInvalidateCacheAndInFlightRemoveDiscard() {
     print("parking: invalidateCache() and a remove() mid-placement leave nothing behind")
     let host = FakeHost(); let bar = makeBar(host); let chain = makeChain(host, anchor: bar.separator)
@@ -459,6 +481,7 @@ testParkedFillersAreReused()
 testParkedFillersFollowGeometry()
 testStaleParkedFillersAreReplaced()
 testItemWedgedBetweenParkedFillers()
+testTransientSplitDuringRelayoutKeepsParkedFillers()
 testInvalidateCacheAndInFlightRemoveDiscard()
 testLadderLengthsAppliedInOrder()
 testCachedKeyFastPathAndRecovery()

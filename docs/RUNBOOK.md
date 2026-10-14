@@ -113,6 +113,10 @@ lsmp -p "$(pgrep -x 'Hidden Bar')" | grep -c '^0x'        # same count, per righ
 footprint "$(pgrep -x 'Hidden Bar')" | head -20           # "Owned physical footprint (unmapped)" is the leaked part
 ```
 
+`tools/statusitem-port-probe.swift` holds N zero-length status items and logs its
+own port count every 2s and on each screen change; run a few with different N
+side by side to separate per-app from per-item growth across an event.
+
 ## Unit tests for the macOS 27 filler chain
 
 ```sh

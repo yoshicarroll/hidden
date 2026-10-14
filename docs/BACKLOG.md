@@ -84,9 +84,11 @@ Open questions, in priority order:
 - **24h memory dogfood (#361).** Root cause on macOS 27 found and fixed: every status
   item created and removed leaks ~21 Mach ports (OS bug), and the fillers were recreated
   on every collapse (~10k ports, ~580 MB after 14 days); they are now parked and reused.
-  Still open: with no items created, ports still grew 422 → 759 and memory 32 → 72 MB in
-  16h across three sleep/wake cycles with monitor reconnects. Measure growth per
-  reconnect, and whether it scales with the number of live items.
+  The remaining growth (422 → 759 ports in 16h of sleep/wake) is a second OS leak: every
+  live status item loses ~15 ports per display reconnect, ~90 for Hidden Bar's items. A
+  false "parked fillers no longer adjacent" during the reconnect added ~170 more; that
+  split is now checked again after the bar settles. Open: report the OS leak to Apple
+  with `tools/statusitem-port-probe.swift` as the repro.
 - **Old branch decision.** `feature/menubarDetection` (PR #115) and `feature/ghost-mode`
   (PR #57) were kept per never-delete. Review or discard, Han's call.
 

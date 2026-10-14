@@ -163,12 +163,18 @@ A full-tree audit (2026-06) scored 9/10 with hygiene-level findings only.
   item spacing (16pt), so while expanded the parked fillers leave a blank gap
   right of the separator. A drag while expanded re-keys them from geometry and
   can wedge another item between them, so reused fillers must also still be
-  neighbours, or they are replaced at the same key; an item dropped between
+  neighbours, or they are replaced at the same key (a split is checked again
+  after a second, since frames read while MenuBarAgent re-lays the bars during
+  a display reconnect can look split); an item dropped between
   the separator and the gap is not detected and ends up hidden (accepted: the
   validation allows up to 72pt there for system items). `discard()` really
   removes the fillers: when the anchor is replaced or removed, when the cache
   is invalidated, and when the separators are shown again. Probes are still
-  created per search. Measured on 27.0 (26A428); see the comments in both
+  created per search. Separately, every live status item leaks about 15 ports
+  per display reconnect (an unplug/replug: 0 items leaked nothing, 10 items
+  145 ports; `tools/statusitem-port-probe.swift` reproduces it), so a
+  long-running instance still grows with sleep/wake on external displays; only
+  fewer items would help. Measured on 27.0 (26A428); see the comments in both
   files.
 - **Other apps' open menus**: interaction-awareness is pointer-position-based;
   a pointer deep inside another app's open dropdown is below the menubar band,
